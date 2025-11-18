@@ -1,3 +1,19 @@
+# ---- DEBUG SNIPPET: safe checks (temporary) ----
+secret_keys = ["SERVICE_ACCOUNT_JSON","ZAMALEK_SHEET_ID","ALEXANDRIA_SHEET_ID","SMTP_USER","SMTP_PASSWORD","SUPERPAY_PERCENT"]
+present = {k: (k in st.secrets and bool(st.secrets[k])) for k in secret_keys}
+st.sidebar.markdown("**Debug: secrets present?**")
+for k,v in present.items():
+    st.sidebar.write(f"{k}: {v}")
+# try safe extract client_email without printing private key
+try:
+    raw = st.secrets.get("SERVICE_ACCOUNT_JSON","")
+    import re
+    m = re.search(r'"client_email"\s*:\s*"([^"]+)"', raw)
+    st.sidebar.write("client_email OK:" , bool(m))
+    if m: st.sidebar.write("client_email (masked):", m.group(1))
+except Exception:
+    st.sidebar.write("client_email: error")
+# -------------------------------------------------
 
 import streamlit as st
 from dotenv import load_dotenv
