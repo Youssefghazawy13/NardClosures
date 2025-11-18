@@ -1,3 +1,4 @@
+import streamlit as st
 # ---- DEBUG SNIPPET: safe checks (temporary) ----
 secret_keys = ["SERVICE_ACCOUNT_JSON","ZAMALEK_SHEET_ID","ALEXANDRIA_SHEET_ID","SMTP_USER","SMTP_PASSWORD","SUPERPAY_PERCENT"]
 present = {k: (k in st.secrets and bool(st.secrets[k])) for k in secret_keys}
@@ -14,8 +15,6 @@ try:
 except Exception:
     st.sidebar.write("client_email: error")
 # -------------------------------------------------
-
-import streamlit as st
 from dotenv import load_dotenv
 load_dotenv()
 
