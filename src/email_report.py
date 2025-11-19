@@ -132,3 +132,33 @@ def send_daily_submission_report(date_str: str, recipients: list, st_secrets=Non
         server.quit()
 
     return {"status": "sent", "recipients": recipients, "date": date_str}
+# --- Send today's summary email (test) - updated to include recipients from secrets ---
+st.write("---")
+if st.button("Send today's summary email (test)"):
+    try:
+        # Build a minimal summary to send — adapt fields to your desired report
+        report = {
+            "date": selected_date.isoformat(),
+            "branch": branch,
+            "changed_fields": ", ".join(changed_fields) if 'changed_fields' in locals() else "",
+        }
+
+        # Get recipients from secrets (comma-separated string). Fallback to SMTP_USER if none.
+        raw_recipients = st.secrets.get("REPORT_RECIPIENTS", "")
+        if raw_recipients and isinstance(raw_recipients, str):
+            recipients = [r.strip() for r in raw_recipients.split(",") if r.strip()]
+        else:
+            # fallback single recipient
+            recipients = [st.secrets.get("SMTP_USER")] if st.secrets.get("SMTP_USER") else []
+
+        if not recipients:
+            st.error("No recipients configured. Set REPORT_RECIPIENTS in Streamlit secrets.")
+        else:
+            # Call the email function with recipients list (adapt signature if your function expects a string)
+            # If your send_daily_submission_report expects recipients as list or CSV, adapt accordingly.
+            send_daily_submission_report(report, recipients)
+
+            st.success(f"Test email sent to: {', '.join(recipients)} (if SMTP is configured).")
+    except Exception:
+        st.error("Email send failed. Check logs.")
+        logger.exception("Email send failed")
