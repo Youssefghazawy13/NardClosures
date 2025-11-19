@@ -1,4 +1,4 @@
-# streamlit_app.py (full updated file)
+# streamlit_app.py (full replacement)
 import os
 import re
 import logging
@@ -6,32 +6,6 @@ import datetime
 import json
 
 import streamlit as st
-# TEMP SMTP CHECK - paste and run, then remove
-import smtplib, ssl
-import streamlit as st
-
-st.sidebar.markdown("### SMTP debug (temporary)")
-try:
-    server = st.secrets.get("SMTP_SERVER")
-    port = int(st.secrets.get("SMTP_PORT") or 587)
-    user = st.secrets.get("SMTP_USER")
-    pwd = st.secrets.get("SMTP_PASSWORD")
-    st.sidebar.write("SMTP server preview:", server, port)
-    st.sidebar.write("SMTP user (masked):", (user[:3] + "..." + user[-5:]) if user else None)
-
-    ctx = ssl.create_default_context()
-    with smtplib.SMTP(server, port, timeout=20) as s:
-        s.ehlo()
-        s.starttls(context=ctx)
-        s.ehlo()
-        s.login(user, pwd)
-    st.sidebar.success("SMTP login successful ✅")
-except Exception as e:
-    st.sidebar.error("SMTP test failed. See error below.")
-    st.sidebar.write(repr(e))
-    import logging
-    logging.exception("SMTP test failed")
-
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -247,7 +221,7 @@ if st.button("Compare & Save"):
     else:
         st.success(f"Detected changed fields: {changed_fields}")
 
-        # ------------------ SAVE BLOCK (replace placeholder) ------------------
+        # ------------------ SAVE BLOCK ----------------------------------
         # Map branch to sheet id
         sheet_id = SHEET_ID_MAP.get(branch)
         if not sheet_id:
@@ -296,17 +270,21 @@ if st.button("Compare & Save"):
                     df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
                     row_idx = len(df) - 1
 
-                # Ensure all manual fields exist as columns
+                # Ensure all manual fields exist as columns and cast to object to avoid dtypes issues
                 for fld in manual_fields:
                     if fld not in df.columns:
                         df[fld] = ""
+                    else:
+                        try:
+                            df[fld] = df[fld].astype(object)
+                        except Exception:
+                            df[fld] = df[fld].apply(lambda x: x if (x is None or isinstance(x, str)) else x)
 
                 # Update changed fields into dataframe row
                 for fld in changed_fields:
                     df.at[row_idx, fld] = edited.get(fld, df.at[row_idx, fld])
 
                 # Write the updated month sheet back
-                # If your SheetsClient supplies a safer patch/update method, prefer that to avoid rewriting entire sheet.
                 client.write_month_sheet(sheet_id=sheet_id, sheet_name=sheet_name, df=df)
 
                 # Build changelog row
@@ -327,7 +305,16 @@ if st.button("Compare & Save"):
                         changelog_df = client.read_month_sheet(sheet_id, "ChangeLog")
                     except Exception:
                         changelog_df = pd.DataFrame(columns=list(changelog_row.keys()))
-                        # --- Optional: send email report button (small test) -----------------------
+                    changelog_df = pd.concat([changelog_df, pd.DataFrame([changelog_row])], ignore_index=True)
+                    client.write_month_sheet(sheet_id=sheet_id, sheet_name="ChangeLog", df=changelog_df)
+
+                st.success("Saved changes and appended changelog.")
+            except Exception as e:
+                st.error("Failed to save changes. Check logs for details.")
+                logger.exception("Save changes failed")
+        # ------------------ END SAVE BLOCK -----------------------------------
+
+# --- Optional: send email report button (small test) -----------------------
 st.write("---")
 if st.button("Send today's summary email (test)"):
     try:
