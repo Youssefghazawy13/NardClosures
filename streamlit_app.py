@@ -1,4 +1,3 @@
-# --- Branch / Sheet / Day selector + edit row UI (drop-in) ---
 st.markdown("## Choose branch, sheet and day")
 
 # 1) Branch select
