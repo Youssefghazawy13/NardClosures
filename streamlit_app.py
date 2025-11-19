@@ -13,7 +13,7 @@ load_dotenv()
 
 import pandas as pd
 
-# timezone helper
+# timezone helper (Cairo)
 try:
     from zoneinfo import ZoneInfo  # Python 3.9+
     CAIRO_TZ = ZoneInfo("Africa/Cairo")
@@ -75,13 +75,6 @@ def safe_float(val):
         raise ValueError(f"Unparseable numeric value: {val!r}")
     return float(s)
 
-def _find_column(df_local: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-    for cand in candidates:
-        for c in df_local.columns:
-            if c.lower().strip() == cand.lower().strip():
-                return c
-    return None
-
 def _parse_date_cell(v):
     if pd.isna(v) or v == "":
         return None
@@ -90,8 +83,8 @@ def _parse_date_cell(v):
     except Exception:
         return None
 
+# lightweight day summary (used only optionally)
 def compute_daily_metrics_from_sheet(client: SheetsClient, sheet_id: str, sheet_name: str, target_date: datetime.date) -> Dict[str, object]:
-    # lightweight summary (used only if needed)
     metrics = {"num_invoices": 0, "num_products": 0, "total_system_sales": 0.0, "total_sales": 0.0,
                "entered_cash_amount": 0.0, "card_amount": 0.0, "cash_outs": 0.0}
     try:
@@ -126,7 +119,6 @@ def compute_daily_metrics_from_sheet(client: SheetsClient, sheet_id: str, sheet_
     metrics["total_system_sales"] = get_num("Total System Sales") if "Total System Sales" in df.columns else get_num("System amount Cash") + get_num("System amount Card")
     metrics["total_sales"] = get_num("Total Sales") if "Total Sales" in df.columns else metrics["total_system_sales"]
     metrics["entered_cash_amount"] = get_num("entered cash amount")
-    # accept both names for card in legacy rows
     if "entered Card amount" in df.columns:
         metrics["card_amount"] = get_num("entered Card amount")
     elif "Card amount" in df.columns:
@@ -216,7 +208,7 @@ chosen_day = datetime.date.fromisoformat(selected_label)
 row_idx = days_map[selected_label]
 st.success(f"Loaded row for {chosen_day.isoformat()}")
 
-# Manual fields (exact set you specified)
+# Manual fields (exact set)
 edit_columns = [
     "No.Invoices","No. Products","System amount Cash","System amount Card","Total System Sales",
     "entered cash amount","entered Card amount","Cash outs","system cashouts",
@@ -312,8 +304,10 @@ with st.form("single_submit_form", clear_on_submit=False):
         cash_outs_day = _safe_from_sources("Cash outs", inputs, sheet_row_dict)
         petty_cash_day = _safe_from_sources("Petty cash", inputs, sheet_row_dict)
 
+        # Total System Sales = system_cash + system_card
         total_system_sales_day = round(system_cash_day + system_card_day, 2)
-        total_sales_day = round(entered_cash_day + entered_card_day, 2)
+        # Total Sales per your last instruction: entered cash amount - entered Card amount
+        total_sales_day = round(entered_cash_day - entered_card_day, 2)
 
         # accumulative sums up to chosen_day (inclusive) within this tab
         rows_by_date = []
@@ -345,6 +339,7 @@ with st.form("single_submit_form", clear_on_submit=False):
         cash_deficit_day = round(system_cash_day - entered_cash_day, 2)
         card_deficit_day = round(system_card_day - entered_card_day, 2)
         sp_pct = float(st.secrets.get("SUPERPAY_PERCENT", 0))
+        # CORRECT SuperPay expected: card - (card * sp_pct/100)
         superpay_expected_day = round(entered_card_day - (entered_card_day * sp_pct / 100.0), 2)
         net_cash_day = round(entered_cash_day - cash_outs_day - petty_cash_day, 2)
 
@@ -358,7 +353,67 @@ with st.form("single_submit_form", clear_on_submit=False):
             "accumulative_cash": acc_cash, "accumulative_card": acc_card, "total_money_accumulative": total_money_accumulative
         }
 
-        # append changelog (ChangeLog may be created by sheets_client.append_changelog)
+        # --------- WRITE computed columns into the month sheet row (only if columns exist) ----------
+        computed_to_write = {
+            "Net cash": financials.get("net_cash_day"),
+            "net cash": financials.get("net_cash_day"),
+            "Accumulative cash": financials.get("accumulative_cash"),
+            "Accumulative card": financials.get("accumulative_card"),
+            "Total Money": financials.get("total_money_accumulative"),
+            "SuperPay expected": financials.get("superpay_expected_day"),
+            "Cash Deficit": financials.get("cash_deficit_day"),
+            "Card Deficit": financials.get("card_deficit_day"),
+            "Total Sales": total_sales_day
+        }
+
+        # SuperPay diff compute
+        superpay_sent_val = None
+        if "SuperPay sent" in inputs and inputs.get("SuperPay sent", "") != "":
+            try:
+                superpay_sent_val = float(str(inputs.get("SuperPay sent")).replace(",", "").strip())
+            except Exception:
+                superpay_sent_val = None
+        if superpay_sent_val is None:
+            if "SuperPay sent" in sheet_row_dict:
+                try:
+                    superpay_sent_val = float(str(sheet_row_dict.get("SuperPay sent") or 0).replace(",", "").strip())
+                except Exception:
+                    superpay_sent_val = None
+
+        if superpay_sent_val is not None:
+            sp_expected = computed_to_write.get("SuperPay expected") or 0.0
+            sp_diff = round((float(sp_expected) - float(superpay_sent_val)), 2)
+            computed_to_write["SuperPay diff"] = sp_diff
+        else:
+            if "SuperPay diff" in df.columns:
+                sp_expected = computed_to_write.get("SuperPay expected") or 0.0
+                computed_to_write["SuperPay diff"] = round(float(sp_expected) - 0.0, 2)
+
+        wrote_any = False
+        for col_name, val in computed_to_write.items():
+            if col_name in df.columns:
+                try:
+                    if val is None:
+                        df.at[row_idx_local, col_name] = ""
+                    else:
+                        if isinstance(val, (int, float)):
+                            df.at[row_idx_local, col_name] = round(float(val), 2)
+                        else:
+                            try:
+                                df.at[row_idx_local, col_name] = round(float(str(val).replace(",", "").strip()), 2)
+                            except Exception:
+                                df.at[row_idx_local, col_name] = str(val)
+                    wrote_any = True
+                except Exception:
+                    logger.exception("Failed writing computed column %s", col_name)
+
+        if wrote_any:
+            try:
+                client.write_month_sheet(sheet_id=sheet_id, sheet_name=sheet_name, df=df)
+            except Exception:
+                logger.exception("Failed to write computed columns back to sheet")
+
+        # append changelog (ChangeLog may be created)
         changelog_row = {
             "timestamp": closure_ts, "user": closed_by, "branch": branch, "sheet": sheet_name,
             "date": chosen_day.isoformat(), "changed_fields": ", ".join(changed.keys()) if changed else "(filled)",
@@ -394,7 +449,9 @@ with st.form("single_submit_form", clear_on_submit=False):
                 "entered Card amount": f"{entered_card_day:.2f}", "Total Sales": f"{total_sales_day:.2f}",
                 "Cash outs": f"{cash_outs_day:.2f}", "Petty cash": f"{petty_cash_day:.2f}",
                 "Cash Deficit": f"{cash_deficit_day:.2f}", "Card Deficit": f"{card_deficit_day:.2f}",
-                "SuperPay expected": f"{superpay_expected_day:.2f}", "Net cash": f"{net_cash_day:.2f}",
+                "SuperPay expected": f"{superpay_expected_day:.2f}", "SuperPay sent": sheet_row_dict.get("SuperPay sent", ""),
+                "SuperPay diff": f"{(computed_to_write.get('SuperPay diff') or 0):.2f}",
+                "Net cash": f"{net_cash_day:.2f}",
                 "Accumulative cash": f"{acc_cash:.2f}", "Accumulative card": f"{acc_card:.2f}",
                 "Total Money": f"{total_money_accumulative:.2f}", "closure_time": closure_ts, "closed_by": closed_by
             }
@@ -427,6 +484,6 @@ with st.form("single_submit_form", clear_on_submit=False):
         except Exception:
             logger.exception("Daily summary send failed"); st.error("Failed to send daily summary email. See logs.")
 
-# footer - local service-account JSON path (for your reference)
+# footer - local service-account JSON path
 st.markdown("---")
 st.markdown("Service-account JSON (local): `/mnt/data/b19a61d2-13c7-49f2-a19f-f20665f57d6e.json`")
