@@ -327,16 +327,7 @@ if st.button("Compare & Save"):
                         changelog_df = client.read_month_sheet(sheet_id, "ChangeLog")
                     except Exception:
                         changelog_df = pd.DataFrame(columns=list(changelog_row.keys()))
-                    changelog_df = pd.concat([changelog_df, pd.DataFrame([changelog_row])], ignore_index=True)
-                    client.write_month_sheet(sheet_id=sheet_id, sheet_name="ChangeLog", df=changelog_df)
-
-                st.success("Saved changes and appended changelog.")
-            except Exception as e:
-                st.error("Failed to save changes. Check logs for details.")
-                logger.exception("Save changes failed")
-        # ------------------ END SAVE BLOCK -----------------------------------
-
-# --- Optional: send email report button (small test) -----------------------
+                        # --- Optional: send email report button (small test) -----------------------
 st.write("---")
 if st.button("Send today's summary email (test)"):
     try:
@@ -346,25 +337,24 @@ if st.button("Send today's summary email (test)"):
             "branch": branch,
             "changed_fields": ", ".join(changed_fields) if 'changed_fields' in locals() else "",
         }
-        # send_daily_submission_report should be implemented in src/email_report.py
-        # ---- Email sending block ----
-raw_recipients = st.secrets.get("REPORT_RECIPIENTS", "")
-if raw_recipients and isinstance(raw_recipients, str):
-    recipients = [r.strip() for r in raw_recipients.split(",") if r.strip()]
-else:
-    smtp_user = st.secrets.get("SMTP_USER")
-    recipients = [smtp_user] if smtp_user else []
 
-if not recipients:
-    st.error("No email recipients configured. Set REPORT_RECIPIENTS or SMTP_USER in Streamlit secrets.")
-else:
-    ok = send_daily_submission_report(report, recipients)
-    if ok:
-        st.success(f"Daily email report sent to: {', '.join(recipients)}")
-    else:
-        st.error("Failed to send email — check logs.")
+        # ---- Email sending block (correctly indented inside try) ----
+        raw_recipients = st.secrets.get("REPORT_RECIPIENTS", "")
+        if raw_recipients and isinstance(raw_recipients, str):
+            recipients = [r.strip() for r in raw_recipients.split(",") if r.strip()]
+        else:
+            smtp_user = st.secrets.get("SMTP_USER")
+            recipients = [smtp_user] if smtp_user else []
 
-        st.success("Test email sent (if SMTP is configured).")
+        if not recipients:
+            st.error("No email recipients configured. Set REPORT_RECIPIENTS or SMTP_USER in Streamlit secrets.")
+        else:
+            ok = send_daily_submission_report(report, recipients)
+            if ok:
+                st.success(f"Daily email report sent to: {', '.join(recipients)}")
+            else:
+                st.error("Failed to send email — check logs.")
+
     except Exception:
         st.error("Failed to send email. Check logs.")
         logger.exception("Email send failed")
