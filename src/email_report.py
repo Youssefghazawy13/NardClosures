@@ -1,164 +1,215 @@
+# src/email_report.py
+"""
+Email sending helper for the Register Closures app.
 
+Provides:
+    send_daily_submission_report(report: dict, recipients: Union[str, List[str]]) -> bool
+
+Reads SMTP configuration from one of:
+ - streamlit secrets (preferred): st.secrets["SMTP_SERVER"], ["SMTP_PORT"], ["SMTP_USER"], ["SMTP_PASSWORD"]
+ - environment variables fallback: SMTP_SERVER, SMTP_PORT, SMTP_USER, SMTP_PASSWORD
+
+Example `report` dict:
+{
+    "date": "2025-12-01",
+    "branch": "Zamalek",
+    "changed_fields": "Internet, Cleaning supplies, Bills",
+    "total_sales": "...",
+    ...
+}
+
+`recipients` can be:
+ - a list of email addresses, or
+ - a comma-separated string of emails
+
+Return value:
+ - True on success, False on failure (exceptions are logged).
+"""
+
+from __future__ import annotations
+
+import os
+import logging
 import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-import pandas as pd
-from src.sheets_client import SheetsClient
+import ssl
+from email.message import EmailMessage
+from typing import Iterable, List, Union, Optional
 
-def _row_to_metrics(row):
-    def val(k):
-        try:
-            return float(row.get(k, 0) or 0)
-        except Exception:
-            return 0.0
-    metrics = {
-        "Date": str(row.get("Date", "")),
-        "No.Invoices": int(val("No.Invoices")),
-        "No.Products": int(val("No. Products")),
-        "Total System Sales": val("Total System Sales"),
-        "Total Sales": val("Total Sales"),
-        "entered cash amount": val("entered cash amount"),
-        "Card amount": val("Card amount"),
-        "Cash": val("Cash"),
-        "Cash Deficit": val("Cash Deficit"),
-        "Card Deficit": val("Card Deficit"),
-        "net cash": val("net cash"),
-        "Accumulative cash": val("Accumulative cash"),
-        "Accumulative card": val("Accumulative card"),
-        "Total Money": val("Total Money"),
-        "SuperPay expected": val("SuperPay expected"),
-        "SuperPay sent": val("SuperPay sent"),
-        "SuperPay diff": val("SuperPay diff"),
-        "Cashouts": val("Cashouts"),
-        "Petty cash": val("Petty cash"),
-    }
-    return metrics
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
-def _metrics_to_html_table(metrics: dict, title: str):
-    rows = "".join(f"<tr><td style='padding:4px 8px;border:1px solid #ddd;font-family:Arial'>{k}</td>"
-                   f"<td style='padding:4px 8px;border:1px solid #ddd;font-family:Arial;text-align:right'>{metrics[k]}</td></tr>"
-                   for k in metrics)
-    html = f"""
-    <h3 style="font-family:Arial">{title}</h3>
-    <table style="border-collapse:collapse;border:1px solid #ddd;margin-bottom:12px">
-      <thead><tr><th style='padding:6px;background:#f6f6f6'>Metric</th><th style='padding:6px;background:#f6f6f6'>Value</th></tr></thead>
-      <tbody>
-        {rows}
-      </tbody>
-    </table>
+
+def _get_smtp_config() -> dict:
     """
-    return html
+    Try to load SMTP configuration from Streamlit secrets (if available),
+    otherwise fall back to environment variables.
 
-def _build_email_html(branch_reports: dict, totals_report: dict, report_date: str):
-    header = f"<h2 style='font-family:Arial'>Daily Sales Report — {report_date}</h2>"
-    parts = [header]
-    for branch, metrics in branch_reports.items():
-        parts.append(_metrics_to_html_table(metrics, f"{branch} — Details"))
-    parts.append("<h3 style='font-family:Arial'>Combined Totals</h3>")
-    parts.append(_metrics_to_html_table(totals_report, "Totals"))
-    footer = "<p style='font-family:Arial;font-size:12px;color:#666'>This is an automated message from Register Closures system.</p>"
-    return "<div>" + "".join(parts) + footer + "</div>"
+    Returns a dict with keys: server, port (int), user, password.
+    Raises ValueError if required keys are missing.
+    """
+    server = None
+    port = None
+    user = None
+    password = None
 
-def send_daily_submission_report(date_str: str, recipients: list, st_secrets=None,
-                                 zamalek_sheet_id=None, alex_sheet_id=None, smtp_config=None):
-    client = SheetsClient(st_secrets)
-
-    def find_row_for_date(sheet_id, date_str):
-        sh = client.gc.open_by_key(sheet_id)
-        for ws in sh.worksheets():
-            if ws.title in ("Settings","ChangeLog"):
-                continue
-            df = client.read_month_sheet(sheet_id, ws.title)
-            try:
-                df["__date_key"] = pd.to_datetime(df["Date"]).dt.strftime("%Y-%m-%d")
-            except Exception:
-                df["__date_key"] = df["Date"].astype(str)
-            matched = df[df["__date_key"] == date_str]
-            if not matched.empty:
-                return matched.iloc[0].to_dict()
-        return None
-
-    zam_row = find_row_for_date(zamalek_sheet_id, date_str)
-    alex_row = find_row_for_date(alex_sheet_id, date_str)
-
-    branch_reports = {}
-    if zam_row is not None:
-        branch_reports["Zamalek"] = _row_to_metrics(zam_row)
-    else:
-        branch_reports["Zamalek"] = {"Date": date_str, "No.Invoices": 0, "No.Products":0, "Total Sales":0}
-
-    if alex_row is not None:
-        branch_reports["Alexandria"] = _row_to_metrics(alex_row)
-    else:
-        branch_reports["Alexandria"] = {"Date": date_str, "No.Invoices": 0, "No.Products":0, "Total Sales":0}
-
-    totals = {}
-    numeric_keys = [k for k in branch_reports["Zamalek"].keys() if k not in ("Date",)]
-    for k in numeric_keys:
-        try:
-            totals[k] = round(sum(float(branch_reports[b].get(k, 0) or 0) for b in branch_reports), 2)
-        except Exception:
-            totals[k] = ""
-    totals["Date"] = date_str
-
-    html_body = _build_email_html(branch_reports, totals, report_date=date_str)
-
-    if smtp_config is None and st_secrets is not None:
-        smtp_config = {
-            "smtp_server": st_secrets.get("SMTP_SERVER", "smtp.gmail.com"),
-            "smtp_port": int(st_secrets.get("SMTP_PORT", 587)),
-            "smtp_user": st_secrets.get("SMTP_USER"),
-            "smtp_password": st_secrets.get("SMTP_PASSWORD"),
-            "use_tls": True
-        }
-
-    if not smtp_config or not smtp_config.get("smtp_user") or not smtp_config.get("smtp_password"):
-        raise RuntimeError("Missing SMTP configuration. Provide smtp_user & smtp_password in smtp_config or Streamlit secrets.")
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"[Daily Report] Sales summary for {date_str}"
-    msg["From"] = smtp_config["smtp_user"]
-    msg["To"] = ", ".join(recipients)
-    part_html = MIMEText(html_body, "html")
-    msg.attach(part_html)
-
-    server = smtplib.SMTP(smtp_config["smtp_server"], smtp_config["smtp_port"])
+    # Try Streamlit secrets if streamlit is installed and running
     try:
-        if smtp_config.get("use_tls", True):
-            server.starttls()
-        server.login(smtp_config["smtp_user"], smtp_config["smtp_password"])
-        server.sendmail(msg["From"], recipients, msg.as_string())
-    finally:
-        server.quit()
+        import streamlit as st  # type: ignore
 
-    return {"status": "sent", "recipients": recipients, "date": date_str}
-# --- Send today's summary email (test) - updated to include recipients from secrets ---
-st.write("---")
-if st.button("Send today's summary email (test)"):
-    try:
-        # Build a minimal summary to send — adapt fields to your desired report
-        report = {
-            "date": selected_date.isoformat(),
-            "branch": branch,
-            "changed_fields": ", ".join(changed_fields) if 'changed_fields' in locals() else "",
-        }
-
-        # Get recipients from secrets (comma-separated string). Fallback to SMTP_USER if none.
-        raw_recipients = st.secrets.get("REPORT_RECIPIENTS", "")
-        if raw_recipients and isinstance(raw_recipients, str):
-            recipients = [r.strip() for r in raw_recipients.split(",") if r.strip()]
-        else:
-            # fallback single recipient
-            recipients = [st.secrets.get("SMTP_USER")] if st.secrets.get("SMTP_USER") else []
-
-        if not recipients:
-            st.error("No recipients configured. Set REPORT_RECIPIENTS in Streamlit secrets.")
-        else:
-            # Call the email function with recipients list (adapt signature if your function expects a string)
-            # If your send_daily_submission_report expects recipients as list or CSV, adapt accordingly.
-            send_daily_submission_report(report, recipients)
-
-            st.success(f"Test email sent to: {', '.join(recipients)} (if SMTP is configured).")
+        secrets = getattr(st, "secrets", None)
+        if secrets:
+            server = secrets.get("SMTP_SERVER") or server
+            port = secrets.get("SMTP_PORT") or port
+            user = secrets.get("SMTP_USER") or user
+            password = secrets.get("SMTP_PASSWORD") or password
     except Exception:
-        st.error("Email send failed. Check logs.")
-        logger.exception("Email send failed")
+        # streamlit may not be available in some contexts — ignore
+        pass
+
+    # Environment fallback
+    server = server or os.environ.get("SMTP_SERVER")
+    port = port or os.environ.get("SMTP_PORT")
+    user = user or os.environ.get("SMTP_USER")
+    password = password or os.environ.get("SMTP_PASSWORD")
+
+    if port is None:
+        # default to 587 (STARTTLS)
+        port = 587
+
+    try:
+        port = int(port)
+    except Exception:
+        raise ValueError(f"Invalid SMTP_PORT value: {port!r}")
+
+    if not server or not user or not password:
+        raise ValueError(
+            "SMTP configuration incomplete. Set SMTP_SERVER, SMTP_PORT, SMTP_USER and SMTP_PASSWORD "
+            "in Streamlit secrets or environment variables."
+        )
+
+    return {"server": server, "port": port, "user": user, "password": password}
+
+
+def _normalize_recipients(recipients: Union[str, Iterable[str], None]) -> List[str]:
+    """
+    Normalize recipients argument to a list of strings.
+    Accepts:
+      - comma-separated string
+      - iterable of strings
+    Returns list of non-empty trimmed email strings.
+    """
+    if recipients is None:
+        return []
+    if isinstance(recipients, str):
+        parts = [p.strip() for p in recipients.split(",")]
+        return [p for p in parts if p]
+    try:
+        return [str(p).strip() for p in recipients if str(p).strip()]
+    except Exception:
+        return []
+
+
+def _build_message(subject: str, sender: str, recipients: List[str], report: dict) -> EmailMessage:
+    """
+    Construct an EmailMessage with both plain text and HTML parts.
+    The HTML is simple and safe (table of key/value pairs).
+    """
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = sender
+    msg["To"] = ", ".join(recipients)
+
+    # Plain-text body
+    plain_lines = [
+        f"{subject}",
+        "",
+        "Summary:",
+    ]
+    for k, v in report.items():
+        plain_lines.append(f"{k}: {v}")
+    plain_body = "\n".join(plain_lines)
+
+    # HTML body - basic table
+    html_rows = []
+    for k, v in report.items():
+        # escape minimal HTML; this is internal data so keep it simple
+        k_ = str(k)
+        v_ = str(v)
+        html_rows.append(f"<tr><td style='padding:6px;border:1px solid #ddd'><strong>{k_}</strong></td>"
+                         f"<td style='padding:6px;border:1px solid #ddd'>{v_}</td></tr>")
+
+    html_body = f"""
+    <html>
+      <body>
+        <h2 style="font-family:Arial, sans-serif">Daily submission report</h2>
+        <p style="font-family:Arial, sans-serif">Summary for <strong>{report.get('branch','')}</strong> — date: <strong>{report.get('date','')}</strong></p>
+        <table style="border-collapse:collapse;font-family:Arial, sans-serif">
+          {''.join(html_rows)}
+        </table>
+        <p style="font-family:Arial, sans-serif;color:#666;font-size:12px">This is an automated message from the Register Closures app.</p>
+      </body>
+    </html>
+    """
+
+    msg.set_content(plain_body)
+    msg.add_alternative(html_body, subtype="html")
+    return msg
+
+
+def send_daily_submission_report(report: dict, recipients: Union[str, Iterable[str]]) -> bool:
+    """
+    Send a daily submission report.
+
+    Args:
+        report: dict with report data (date, branch, changed_fields, etc.)
+        recipients: list of emails or comma-separated string of emails
+
+    Returns:
+        True if message was accepted by the SMTP server and no exception was raised; False otherwise.
+    """
+    recipients_list = _normalize_recipients(recipients)
+    if not recipients_list:
+        logger.error("No recipients provided to send_daily_submission_report")
+        raise ValueError("No recipients provided")
+
+    try:
+        cfg = _get_smtp_config()
+    except Exception as e:
+        logger.exception("SMTP configuration error: %s", e)
+        raise
+
+    subject = f"Daily Closure Report — {report.get('branch','')} — {report.get('date','')}"
+    sender = cfg["user"]
+
+    try:
+        msg = _build_message(subject, sender, recipients_list, report)
+    except Exception as e:
+        logger.exception("Failed to build email message: %s", e)
+        raise
+
+    try:
+        context = ssl.create_default_context()
+        # Use SMTP with STARTTLS (port usually 587)
+        with smtplib.SMTP(cfg["server"], cfg["port"], timeout=30) as smtp:
+            smtp.ehlo()
+            smtp.starttls(context=context)
+            smtp.ehlo()
+            smtp.login(cfg["user"], cfg["password"])
+            smtp.send_message(msg)
+        logger.info("Daily submission report sent to %s", recipients_list)
+        return True
+    except Exception as e:
+        logger.exception("Failed to send daily submission report: %s", e)
+        return False
+
+
+# expose a default handler when used as a script for quick test (optional)
+if __name__ == "__main__":  # pragma: no cover
+    logging.basicConfig(level=logging.INFO)
+    sample = {"date": "2025-12-01", "branch": "Zamalek", "changed_fields": "Internet, Bills", "total_sales": "1200"}
+    try:
+        # Example usage: send to SMTP_USER from env (or configure secrets)
+        recips = os.environ.get("REPORT_RECIPIENTS", os.environ.get("SMTP_USER", ""))
+        send_daily_submission_report(sample, recips)
+    except Exception as e:
+        logger.exception("Test send failed: %s", e)
