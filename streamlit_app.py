@@ -1,4 +1,4 @@
-# streamlit_app.py (complete, mobile-first, shows branch -> sheet tabs -> dates)
+# streamlit_app.py (final — mobile-first, months filtered Dec_2025..Dec_2026, branch->tab->day flow)
 import os
 import re
 import json
@@ -12,7 +12,7 @@ load_dotenv()
 
 import pandas as pd
 
-# project modules (must exist under src/)
+# project modules (ensure these exist)
 from src.sheets_client import SheetsClient
 from src.email_report import send_daily_submission_report
 
@@ -153,53 +153,58 @@ if not sheet_id:
     st.error("Missing sheet ID for this branch. Set ZAMALEK_SHEET_ID / ALEXANDRIA_SHEET_ID in Streamlit secrets.")
     st.stop()
 
-# ----------------------- Branch -> tabs -> dates selector ------------------
-st.markdown("### Select sheet (tab) and day")
+# ----------------------- Allowed months list (Dec_2025 .. Dec_2026) ------------
+st.markdown("### Select month tab (Dec_2025 → Dec_2026) and day")
 
-# 1) list worksheets for branch
-sheet_tabs = []
+# build allowed month names range
+start = datetime.date(2025, 12, 1)
+end   = datetime.date(2026, 12, 1)
+months = []
+cur = start
+while cur <= end:
+    months.append(cur.strftime("%B_%Y"))
+    # advance one month
+    year = cur.year + (cur.month // 12)
+    month = cur.month % 12 + 1
+    cur = datetime.date(year, month, 1)
+
+# fetch actual tabs in spreadsheet for the branch
 try:
     if hasattr(client, "list_worksheets"):
-        sheet_tabs = client.list_worksheets(sheet_id) or []
+        real_tabs = client.list_worksheets(sheet_id) or []
     else:
-        # try to access underlying gspread client
         gc = getattr(client, "gc", None) or getattr(client, "_gc", None)
         if gc:
             sh = gc.open_by_key(sheet_id)
-            sheet_tabs = [ws.title for ws in sh.worksheets()]
+            real_tabs = [ws.title for ws in sh.worksheets()]
         else:
-            # fallback try reading Index tab
-            try:
-                idx_df = client.read_month_sheet(sheet_id, "Index")
-                if "sheet_name" in idx_df.columns:
-                    sheet_tabs = [str(x) for x in idx_df["sheet_name"].dropna().unique()]
-            except Exception:
-                sheet_tabs = []
+            real_tabs = []
 except Exception:
-    sheet_tabs = []
+    real_tabs = []
 
-if not sheet_tabs:
-    st.warning("No tabs detected automatically for this branch. Make sure the Service Account has access and the sheet exists.")
-    sheet_name = st.text_input("Enter sheet (tab) name manually (e.g. December_2025):", value=month_sheet_name_for_date_monthname(selected_date))
+# intersect allowed months with real tabs (preserve months order)
+available_month_tabs = [m for m in months if m in real_tabs]
+
+if not available_month_tabs:
+    st.warning("لا يوجد شيت شهرى متاح ضمن النطاق (Dec_2025–Dec_2026) فى هذا الفرع. تأكد من وجود التابس المطلوبة في جوجل شيت وصلاحيات الـ service account.")
+    sheet_name = st.text_input("أدخل اسم الشيت يدويًا (مثال: December_2025):", value=months[0])
 else:
-    sheet_name = st.selectbox("Choose sheet (tab)", sheet_tabs)
+    sheet_name = st.selectbox("اختر الشيت الشهري", available_month_tabs)
 
 if not sheet_name:
-    st.info("Select or type a sheet/tab name to continue.")
+    st.info("اختر شيتًا للشهر لاستكمال.")
     st.stop()
 
 st.write(f"Selected tab: **{sheet_name}**")
 
-# 2) read the selected sheet and list dates inside it
-df_month = None
+# ----------------------- read chosen tab and list dates --------------------
 try:
     df_month = client.read_month_sheet(sheet_id, sheet_name)
 except Exception as e:
-    st.error(f"Unable to read the selected tab **{sheet_name}**. Make sure the tab exists and the service account has Editor access.")
-    logger.exception("Failed to read selected tab %s: %s", sheet_name, e)
+    st.error(f"فشل قراءة التاب '{sheet_name}'. تأكد أن التاب موجود وService Account لديه صلاحية Editor.")
+    logger.exception("Failed to read tab %s: %s", sheet_name, e)
     st.stop()
 
-# find Date column
 date_col = None
 for c in df_month.columns:
     if c.lower().strip().startswith("date"):
@@ -207,8 +212,8 @@ for c in df_month.columns:
         break
 
 if date_col is None:
-    st.info("No 'Date' column detected in this tab. The app expects a Date column to list days.")
-    chosen_date = st.date_input("Choose date manually", value=selected_date)
+    st.info("التاب لا يحتوي على عمود 'Date'. قم بإضافة عمود Date بصيغة yyyy-mm-dd داخل الشيت.")
+    chosen_date = st.date_input("اختر تاريخًا لإنشائه/تعديله", value=datetime.date.today())
     row_idx = None
 else:
     days_map = {}
@@ -218,20 +223,20 @@ else:
             days_map[d.isoformat()] = idx
 
     if not days_map:
-        st.info("No date rows found in this tab yet. You can create the row by saving the form below.")
-        chosen_date = st.date_input("Choose date to create", value=selected_date)
+        st.info("لا توجد صفوف تواريخ داخل هذا التاب بعد. يمكنك إنشاء الصف عبر نموذج الحفظ أدناه.")
+        chosen_date = st.date_input("اختر تاريخًا لإنشائه", value=datetime.date.today())
         row_idx = None
     else:
         sorted_days = sorted(days_map.keys())
-        selected_label = st.selectbox("Choose existing day", ["(choose)"] + sorted_days)
+        selected_label = st.selectbox("اختر يومًا من الشيت", ["(choose)"] + sorted_days)
         if selected_label == "(choose)":
-            st.info("Pick a day from the list to load its row for editing.")
+            st.info("اختر يومًا لتحميل صفه من الشيت.")
             row_idx = None
-            chosen_date = selected_date
+            chosen_date = datetime.date.today()
         else:
             chosen_date = datetime.date.fromisoformat(selected_label)
             row_idx = days_map[selected_label]
-            st.success(f"Loaded row for {chosen_date.isoformat()} (row index: {row_idx})")
+            st.success(f"تم تحميل صف تاريخ: {chosen_date.isoformat()} (row index: {row_idx})")
 
 # ----------------------- Day edit form ------------------------------------
 st.markdown("### Day row (edit or create)")
@@ -259,6 +264,7 @@ with st.form("day_edit_form", clear_on_submit=False):
             template_cols = ["Date"] + edit_columns + ["Closed By", "Closure Time"]
             df = pd.DataFrame(columns=template_cols)
 
+        # find/date column
         date_col_local = None
         for c in df.columns:
             if c.lower().strip().startswith("date"):
@@ -269,18 +275,19 @@ with st.form("day_edit_form", clear_on_submit=False):
             if date_col_local not in df.columns:
                 df.insert(0, date_col_local, "")
 
+        # find row or append
         row_idx_local = None
         for idx, v in df[date_col_local].items():
             if _parse_date_cell(v) == chosen_date:
                 row_idx_local = idx
                 break
-
         if row_idx_local is None:
             new_row = {c: "" for c in df.columns}
             new_row[date_col_local] = chosen_date.isoformat()
             df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
             row_idx_local = len(df) - 1
 
+        # ensure columns
         for col in edit_columns:
             if col not in df.columns:
                 df[col] = ""
@@ -290,6 +297,7 @@ with st.form("day_edit_form", clear_on_submit=False):
                 except Exception:
                     df[col] = df[col].apply(lambda x: x if (x is None or isinstance(x, str)) else x)
 
+        # compute changes
         changed = {}
         prev_vals = {}
         for col in edit_columns:
