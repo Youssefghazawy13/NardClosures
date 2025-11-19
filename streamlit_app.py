@@ -1,144 +1,144 @@
+# streamlit_app.py
+import os
+import re
+import logging
+import datetime
+import json
+
 import streamlit as st
 from dotenv import load_dotenv
 load_dotenv()
 
-import os, datetime, pandas as pd
+import pandas as pd
+
+# your project modules (assumes these exist in src/)
 from src.sheets_client import SheetsClient
 from src.calc import recalc_forward
 from src.email_report import send_daily_submission_report
 
-st.set_page_config(page_title="Register Closures", layout="wide")
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
-# --- Secrets handling ---
-# Prefer st.secrets (Streamlit Cloud). Fall back to environment variables for local dev.
-st_secrets = None
+# --- Initialize client using Streamlit secrets ---
+st_secrets = st.secrets if hasattr(st, "secrets") else {}
 try:
-    st_secrets = st.secrets
-except Exception:
-    st_secrets = None
-
-def get_secret(key, default=None):
-    if st_secrets and key in st_secrets:
-        return st_secrets.get(key)
-    return os.getenv(key, default)
-
-ZAM_ID = get_secret("ZAMALEK_SHEET_ID")
-ALX_ID = get_secret("ALEXANDRIA_SHEET_ID")
-SP_PCT = float(get_secret("SUPERPAY_PERCENT", 0.014))
-
-if not ZAM_ID or not ALX_ID:
-    st.error("Missing sheet IDs. Set ZAMALEK_SHEET_ID and ALEXANDRIA_SHEET_ID in Streamlit secrets or environment.")
-    st.stop()
-
-client = SheetsClient(st_secrets)
-
-# --- Authentication (simple role selector for MVP) ---
-st.sidebar.header("User & Branch")
-user = st.sidebar.selectbox("User role", [
-    "Operations Manager",
-    "Operations Team Member",
-    "Alexandria Store Manager",
-    "Zamalek Store Manager"
-])
-cashier = st.sidebar.text_input("Cashier / Data entered by (optional)", value="")
-
-branch = st.sidebar.selectbox("Branch", ["Zamalek", "Alexandria"])
-sheet_id = ZAM_ID if branch == "Zamalek" else ALX_ID
-
-st.title("Register Closures — Prototype")
-st.markdown(f"Branch: **{branch}**  |  Role: **{user}**  |  SuperPay%: **{SP_PCT*100:.2f}%**")
-
-# load available month sheets (skip Settings & ChangeLog)
-try:
-    sh = client.gc.open_by_key(sheet_id)
-    worksheet_list = [ws.title for ws in sh.worksheets() if ws.title not in ("Settings","ChangeLog")]
+    client = SheetsClient(st_secrets)
 except Exception as e:
-    st.error(f"Failed to open sheet: {e}")
+    st.error("Failed to initialize Sheets client. Check service account secrets and logs.")
+    logger.exception("SheetsClient init failed")
     st.stop()
 
-month = st.selectbox("Month sheet", worksheet_list)
+# --- Helper: robust numeric parsing -----------------------------------------
+def safe_float(val):
+    """
+    Robust conversion to float:
+    - None or empty or '-' or '—' -> 0.0
+    - strips commas, currency symbols, whitespace
+    - supports parentheses for negative numbers: (123.45) -> -123.45
+    - removes any non-digit except dot and minus before float conversion
+    - raises ValueError if still impossible
+    """
+    if val is None:
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).strip()
+    if s == "" or s in ("-", "—"):
+        return 0.0
 
-# read whole month sheet as dataframe
-df = client.read_month_sheet(sheet_id, month)
-if df.empty:
-    st.info("Month sheet is empty. Check template.")
-    st.stop()
+    # parentheses negative ( (123) => -123 )
+    if s.startswith("(") and s.endswith(")"):
+        s = "-" + s[1:-1]
 
-# show compact overview
-st.subheader("Month overview")
-overview_cols = ["Date","Total Sales","Cash","Card amount","Accumulative cash","Accumulative card","Total Money"]
-for c in overview_cols:
-    if c not in df.columns:
-        df[c] = 0
-st.dataframe(df[overview_cols].fillna(0).astype(object).head(31), height=300)
+    # remove commas used as thousand separators
+    s = s.replace(",", "")
 
-# pick date
-date_list = df["Date"].astype(str).tolist()
-selected_date = st.selectbox("Select date to edit", date_list)
-row_idx = int(df.index[df["Date"].astype(str) == selected_date][0])
-row = df.loc[row_idx].copy()
+    # remove common currency symbols and whitespace
+    # keep digits, dot, minus only
+    s = re.sub(r"[^\d\.\-]", "", s)
 
-st.subheader(f"Editing {selected_date}")
+    if s == "" or s == "-" or s == ".":
+        raise ValueError(f"Unparseable numeric value: {val!r}")
 
-# manual fields (as defined)
+    return float(s)
+
+
+# --- Example UI / Main app flow ---------------------------------------------
+st.title("Register Closures — Streamlit (safe parser patch)")
+
+# Sidebar: choose role & branch (minimal for the example)
+st.sidebar.header("User & Branch")
+role = st.sidebar.selectbox("Role", ["Operations Manager", "Operations Team Member", "Alexandria Store Manager", "Zamalek Store Manager"])
+branch = st.sidebar.selectbox("Branch", ["Zamalek", "Alexandria"])
+
+# Simple inputs for testing changed_fields logic
+st.header("Daily entry (test)")
+
+# Manual fields sample (should match the real manual_fields in your app)
 manual_fields = [
-    "No.Invoices","No. Products","System amount Cash","System amount Card",
-    "entered cash amount","Card amount","Cash outs","Employee advances","Transportation Goods",
-    "Transportation Allowance","Cleaning","Internet","Cleaning supplies","Bills",
-    "Others","Others Comment","Notes","system cashouts","Cashouts","Petty cash","SuperPay sent"
+    "No.Invoices", "No. Products", "System amount Cash", "System amount Card",
+    "entered cash amount", "Card amount", "Cash outs", "Employee advances",
+    "Transportaion Goods", "Transportaion Allowance", "Cleaning", "Internet",
+    "Cleaning supplies", "Bills", "Others"
 ]
 
-with st.form("edit_form", clear_on_submit=False):
-    edited = {}
-    cols = st.columns(2)
-    for i, field in enumerate(manual_fields):
-        col = cols[i%2]
-        val = row.get(field, "")
-        if field in ["Others Comment","Notes"]:
-            edited[field] = col.text_area(field, value=str(val), key=field)
-        else:
-            try:
-                numval = float(val or 0)
-            except Exception:
-                numval = 0.0
-            edited[field] = col.number_input(field, value=numval, step=1.0, key=field)
-    save = st.form_submit_button("Save changes")
+# Simulate "old_values" (read from sheet in the real app) - here we provide inputs for both
+st.subheader("Old values (simulate loaded from sheet)")
+old_values = {}
+for c in manual_fields:
+    old_values[c] = st.text_input(f"Old - {c}", value="0", key=f"old_{c}")
 
-if save:
-    # prepare old values for changelog
-    old_values = {c: row.get(c) for c in manual_fields}
-    # write manual fields into df
-    for c, v in edited.items():
-        df.at[row_idx, c] = v
-    # recalc forward
-    df_updated = recalc_forward(df, start_idx=row_idx, superpay_pct=SP_PCT)
-    # write back
-    client.write_month_sheet(sheet_id, month, df_updated)
-    # append changelog
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    changed_fields = [c for c in manual_fields if float(old_values.get(c) or 0) != float(edited.get(c) or 0)]
-    row_for_log = [
-        timestamp, f"{user}" + (f" | {cashier}" if cashier else ""), branch, month, selected_date,
-        ",".join(changed_fields),
-        str(old_values),
-        str({c:edited[c] for c in changed_fields}),
-        ""
-    ]
-    client.append_changelog(sheet_id, "ChangeLog", row_for_log)
-    st.success("Saved and recalculated forward. Sheet updated.")
+st.subheader("Edited values (what user will save)")
+edited = {}
+for c in manual_fields:
+    edited[c] = st.text_input(f"Edited - {c}", value="0", key=f"new_{c}")
 
-    # send email report for this date across both branches
+# Button to simulate save/compare
+if st.button("Compare & Save"):
+    changed_fields = []
+    parse_errors = []
+    for c in manual_fields:
+        old_raw = old_values.get(c)
+        new_raw = edited.get(c)
+
+        try:
+            old_num = safe_float(old_raw)
+        except Exception as e:
+            parse_errors.append((c, "old", old_raw, str(e)))
+            logger.exception("Failed parsing old value for %s: %r", c, old_raw)
+            # fallback to 0.0 to allow process to continue
+            old_num = 0.0
+
+        try:
+            new_num = safe_float(new_raw)
+        except Exception as e:
+            parse_errors.append((c, "new", new_raw, str(e)))
+            logger.exception("Failed parsing new value for %s: %r", c, new_raw)
+            new_num = 0.0
+
+        if old_num != new_num:
+            changed_fields.append(c)
+
+    # Show results
+    if parse_errors:
+        st.warning("Some fields had parsing issues. Check logs or correct inputs.")
+        for (field, which, raw, err_msg) in parse_errors:
+            st.write(f"Parse issue — field: {field}, which: {which}, raw: {raw!r}, error: {err_msg}")
+
+    if changed_fields:
+        st.success(f"Detected changed fields: {changed_fields}")
+    else:
+        st.info("No changed numeric fields detected.")
+
+    # --- Place where your app would proceed to update sheet / append changelog ---
+    # Example (pseudo):
     try:
-        recipients = [x.strip() for x in (get_secret("REPORT_RECIPIENTS","").split(",")) if x.strip()]
-        selected_date_str = pd.to_datetime(selected_date).strftime("%Y-%m-%d")
-        send_daily_submission_report(
-            date_str=selected_date_str,
-            recipients=recipients,
-            st_secrets=st_secrets,
-            zamalek_sheet_id=ZAM_ID,
-            alex_sheet_id=ALX_ID,
-            smtp_config=None
-        )
-        st.info("Email report sent.")
+        # Example function call - replace with your real save logic
+        # client.write_month_sheet(sheet_id, sheet_name, df)
+        st.write("Proceeding to save... (this is a placeholder)")
     except Exception as e:
-        st.warning(f"Email failed: {e}")
+        st.error("Failed to save changes.")
+        logger.exception("Save failed")
+
+# ---------------------------------------------------------------------------
+# End of file
