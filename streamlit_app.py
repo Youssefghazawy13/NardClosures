@@ -1,5 +1,5 @@
 # streamlit_app.py
-# Updated: Total System Sales and Total Sales computed by app; SuperPay expected computed as card * (1 - pct/100)
+# Branch-first UI, branch-scoped roles, require first & last name for every role.
 import os
 import re
 import json
@@ -83,7 +83,7 @@ def _parse_date_cell(v):
     except Exception:
         return None
 
-# lightweight day summary (used only optionally)
+# compute summary helper (optional)
 def compute_daily_metrics_from_sheet(client: SheetsClient, sheet_id: str, sheet_name: str, target_date: datetime.date) -> Dict[str, object]:
     metrics = {"num_invoices": 0, "num_products": 0, "total_system_sales": 0.0, "total_sales": 0.0,
                "entered_cash_amount": 0.0, "card_amount": 0.0, "cash_outs": 0.0}
@@ -130,9 +130,43 @@ def compute_daily_metrics_from_sheet(client: SheetsClient, sheet_id: str, sheet_
 st.set_page_config(layout="centered")
 st.title("Register Closures — Slot-X")
 
-# Top controls: Role & Branch only
-role = st.selectbox("Role", ["Operations Manager", "Operations Team Member", "Alexandria Store Manager", "Zamalek Store Manager"], index=0)
-branch = st.selectbox("Branch", ["Zamalek", "Alexandria"], index=0)
+# --- Branch selection first (start with placeholder) ---
+branch_options = ["(choose)", "Zamalek", "Alexandria"]
+branch = st.selectbox("Branch", branch_options, index=0, key="ui_branch_select")
+if branch == "(choose)":
+    st.info("Please select Branch to continue.")
+    st.stop()
+
+# roles filtered by branch
+if branch == "Alexandria":
+    role_options = ["(choose)", "Owner", "Operations Manager", "Operations Team Member", "Alexandria Store Manager", "Alexandria Sales Member"]
+else:
+    role_options = ["(choose)", "Owner", "Operations Manager", "Operations Team Member", "Zamalek Store Manager", "Zamalek Sales Member"]
+
+role = st.selectbox("Role", role_options, index=0, key="ui_role_select")
+
+# require name entry for every role (including Operations Manager and Team Member)
+user_first = ""
+user_last = ""
+if role != "(choose)":
+    # label depends on role to help user, but still same fields
+    if "Owner" in role:
+        st.markdown("**Owner details**")
+    elif "Sales Member" in role:
+        st.markdown("**Sales member details**")
+    elif "Store Manager" in role:
+        st.markdown("**Store manager details**")
+    elif "Operations Manager" in role:
+        st.markdown("**Operations manager details**")
+    else:
+        st.markdown("**User details**")
+    user_first = st.text_input("First name", value="", key="ui_user_first")
+    user_last = st.text_input("Last name", value="", key="ui_user_last")
+
+if role == "(choose)":
+    st.info("Please select Role to continue.")
+    st.stop()
+
 st.markdown(f"**Branch:** {branch}  •  **Role:** {role}")
 
 # Sheet IDs map
@@ -229,6 +263,11 @@ with st.form("single_submit_form", clear_on_submit=False):
     submit = st.form_submit_button("Submit")
 
     if submit:
+        # basic validation: names required
+        if not user_first or not user_last:
+            st.error("First name and last name are required for the selected role.")
+            st.stop()
+
         # reload sheet
         try:
             df = client.read_month_sheet(sheet_id, sheet_name)
@@ -275,8 +314,10 @@ with st.form("single_submit_form", clear_on_submit=False):
         for col in edit_columns:
             df.at[row_idx_local, col] = inputs.get(col, df.at[row_idx_local, col])
 
-        # DO NOT write Closed By / Closure Time to month sheet
-        closure_dt = now_cairo(); closure_ts = format_dt_cairo(closure_dt); closed_by = str(role)
+        # closed_by includes role and provided name
+        provided_name = f"{user_first.strip()} {user_last.strip()}".strip()
+        closure_dt = now_cairo(); closure_ts = format_dt_cairo(closure_dt)
+        closed_by = f"{role} — {provided_name}"
 
         # write back df to sheet (overwrite values)
         try:
@@ -339,7 +380,7 @@ with st.form("single_submit_form", clear_on_submit=False):
         cash_deficit_day = round(system_cash_day - entered_cash_day, 2)
         card_deficit_day = round(system_card_day - entered_card_day, 2)
         sp_pct = float(st.secrets.get("SUPERPAY_PERCENT", 0))
-        # CORRECT SuperPay expected: card * (1 - pct/100)
+        # SuperPay expected: card * (1 - pct/100)
         superpay_expected_day = round(entered_card_day * (1.0 - sp_pct / 100.0), 2)
         net_cash_day = round(entered_cash_day - cash_outs_day - petty_cash_day, 2)
 
@@ -416,13 +457,24 @@ with st.form("single_submit_form", clear_on_submit=False):
 
         # append changelog (ChangeLog may be created)
         changelog_row = {
-            "timestamp": closure_ts, "user": closed_by, "branch": branch, "sheet": sheet_name,
-            "date": chosen_day.isoformat(), "changed_fields": ", ".join(changed.keys()) if changed else "(filled)",
-            "prev_values": json.dumps(prev_vals, default=str), "new_values": json.dumps(changed if changed else inputs, default=str),
-            "closed_by": closed_by, "closure_time": closure_ts,
+            "timestamp": closure_ts,
+            "role": role,
+            "user_first_name": user_first,
+            "user_last_name": user_last,
+            "closed_by": closed_by,
+            "branch": branch,
+            "sheet": sheet_name,
+            "date": chosen_day.isoformat(),
+            "changed_fields": ", ".join(changed.keys()) if changed else "(filled)",
+            "prev_values": json.dumps(prev_vals, default=str),
+            "new_values": json.dumps(changed if changed else inputs, default=str),
+            "closure_time": closure_ts,
             "financials": json.dumps(financials, default=str),
-            "total_system_sales_day": total_system_sales_day, "total_sales_day": total_sales_day,
-            "accumulative_cash": acc_cash, "accumulative_card": acc_card, "total_money": total_money_accumulative
+            "total_system_sales_day": total_system_sales_day,
+            "total_sales_day": total_sales_day,
+            "accumulative_cash": acc_cash,
+            "accumulative_card": acc_card,
+            "total_money": total_money_accumulative
         }
         try:
             if hasattr(client, "append_changelog"):
@@ -443,6 +495,7 @@ with st.form("single_submit_form", clear_on_submit=False):
         try:
             report = {
                 "branch": branch, "date": chosen_day.isoformat(),
+                "role": role, "user_first_name": user_first, "user_last_name": user_last,
                 "No.Invoices": inputs.get("No.Invoices", sheet_row_dict.get("No.Invoices", "")),
                 "No. Products": inputs.get("No. Products", sheet_row_dict.get("No. Products", "")),
                 "System amount Cash": f"{system_cash_day:.2f}", "System amount Card": f"{system_card_day:.2f}",
