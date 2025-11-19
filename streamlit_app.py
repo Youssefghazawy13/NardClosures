@@ -166,7 +166,7 @@ except Exception:
 
 available_month_tabs = [m for m in months if m in real_tabs]
 
-st.markdown("Select month tab (Dec_2025 → Dec_2026) and day")
+st.markdown("Select month tab and day")
 
 if not available_month_tabs:
     st.warning("No monthly tabs available in the Dec_2025–Dec_2026 range for this branch. Create required tabs manually in the spreadsheet.")
