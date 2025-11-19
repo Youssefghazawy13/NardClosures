@@ -23,19 +23,16 @@ def _build_plain_text_report(report: Dict[str, str]) -> str:
 def _build_html_table(report: Dict[str, str]) -> str:
     # produce a simple bordered table
     rows = []
-    # keep a stable order for the important fields first
     order = [
         "No.Invoices","No. Products","System amount Cash","System amount Card","Total System Sales",
         "entered cash amount","entered Card amount","Total Sales",
         "Cash outs","Petty cash","Cash Deficit","Card Deficit","SuperPay expected","SuperPay sent","SuperPay diff","Net cash",
         "Accumulative cash","Accumulative card","Total Money","closure_time","closed_by"
     ]
-    # fallback: include any other keys at the end
     used = set()
     html = ['<html><body>']
     html.append(f"<p><strong>Branch:</strong> {report.get('branch','')} &nbsp;&nbsp; <strong>Date:</strong> {report.get('date','')}</p>")
     html.append('<table style="border-collapse:collapse;border:1px solid #888;">')
-    # header
     html.append('<thead><tr>')
     html.append('<th style="border:1px solid #888;padding:6px;background:#eee">Field</th>')
     html.append('<th style="border:1px solid #888;padding:6px;background:#eee">Value</th>')
@@ -45,7 +42,6 @@ def _build_html_table(report: Dict[str, str]) -> str:
             val = report.get(key, "")
             html.append(f'<tr><td style="border:1px solid #888;padding:6px">{key}</td><td style="border:1px solid #888;padding:6px">{val}</td></tr>')
             used.add(key)
-    # additional keys
     for k, v in report.items():
         if k in ("branch","date") or k in used:
             continue
