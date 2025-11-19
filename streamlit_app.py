@@ -1,20 +1,4 @@
 import streamlit as st
-# --- SHOW MASKED SERVICE_ACCOUNT_JSON (temporary, safe) ---
-try:
-    raw = st.secrets.get("SERVICE_ACCOUNT_JSON", "")
-    import re, json
-    # Create masked preview (replace private_key content with placeholder)
-    masked = re.sub(r'("private_key"\s*:\s*")(.+?)(")', r'\1[PRIVATE_KEY_REDACTED]\3', raw, flags=re.DOTALL)
-    # Also ensure it looks like JSON (don't json.loads raw, just show masked string)
-    st.sidebar.markdown("#### Masked SERVICE_ACCOUNT_JSON preview")
-    st.sidebar.code(masked[:1000])  # show first 1000 chars for safety
-    # show detected client_email if present
-    m = re.search(r'"client_email"\s*:\s*"([^"]+)"', raw)
-    st.sidebar.write("Detected client_email (masked):", m.group(1) if m else "None")
-except Exception as e:
-    st.sidebar.write("Could not produce masked preview:", str(e))
-# --- end masked preview snippet ---
-
 from dotenv import load_dotenv
 load_dotenv()
 
