@@ -347,7 +347,23 @@ if st.button("Send today's summary email (test)"):
             "changed_fields": ", ".join(changed_fields) if 'changed_fields' in locals() else "",
         }
         # send_daily_submission_report should be implemented in src/email_report.py
-        send_daily_submission_report(report)  # adapt signature as needed
+        # ---- Email sending block ----
+raw_recipients = st.secrets.get("REPORT_RECIPIENTS", "")
+if raw_recipients and isinstance(raw_recipients, str):
+    recipients = [r.strip() for r in raw_recipients.split(",") if r.strip()]
+else:
+    smtp_user = st.secrets.get("SMTP_USER")
+    recipients = [smtp_user] if smtp_user else []
+
+if not recipients:
+    st.error("No email recipients configured. Set REPORT_RECIPIENTS or SMTP_USER in Streamlit secrets.")
+else:
+    ok = send_daily_submission_report(report, recipients)
+    if ok:
+        st.success(f"Daily email report sent to: {', '.join(recipients)}")
+    else:
+        st.error("Failed to send email — check logs.")
+
         st.success("Test email sent (if SMTP is configured).")
     except Exception:
         st.error("Failed to send email. Check logs.")
