@@ -1,7 +1,5 @@
 # streamlit_app.py
-# Final updated: Role -> Branch -> month tab -> day (must select existing day) -> Submit
-# No optional date picker, no auto-create rows/columns/tabs. Closure info goes to ChangeLog only.
-
+# Final app: Role -> Branch -> month tab -> existing day -> edit manual fields -> Submit writes only manual fields, appends ChangeLog, sends email
 import os
 import re
 import json
@@ -22,15 +20,15 @@ try:
 except Exception:
     CAIRO_TZ = None
 
-# project modules (make sure these exist)
+# project modules
 from src.sheets_client import SheetsClient
 from src.email_report import send_daily_submission_report
 
-# ---------- logging ----------
+# logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
 
-# ---------- init Sheets client ----------
+# init Sheets client
 st_secrets = st.secrets if hasattr(st, "secrets") else {}
 try:
     client = SheetsClient(st_secrets)
@@ -39,12 +37,11 @@ except Exception:
     logger.exception("SheetsClient init failed")
     st.stop()
 
-# ---------- helpers ----------
+# helpers
 def now_cairo():
     if CAIRO_TZ is not None:
         return datetime.datetime.now(CAIRO_TZ)
     else:
-        # fallback: try env TZ
         try:
             tz_name = os.environ.get("TZ", "")
             if tz_name:
@@ -93,76 +90,26 @@ def _parse_date_cell(v):
     except Exception:
         return None
 
-def compute_financials_from_inputs(inputs: dict, sheet_row: Optional[dict]=None, superpay_percent: float = None):
-    def val(k):
-        if k in inputs and inputs.get(k) not in (None, ""):
-            return float(str(inputs.get(k)).replace(",", "").strip() or 0)
-        if sheet_row and k in sheet_row:
-            try:
-                return float(str(sheet_row.get(k) or 0).replace(",", "").strip())
-            except Exception:
-                return 0.0
-        return 0.0
-
-    system_cash = val("System amount Cash")
-    system_card = val("System amount Card")
-    entered_cash = val("entered cash amount")
-    card_amount = val("Card amount")
-    cash_outs = val("Cash outs")
-    petty_cash = val("Petty cash")  # may be 0 if absent
-
-    cash_deficit = system_cash - entered_cash
-    card_deficit = system_card - card_amount
-
-    sp_percent = float(superpay_percent) if superpay_percent is not None else 0.0
-    superpay_expected = card_amount - (card_amount * sp_percent / 100.0)
-
-    net_cash = entered_cash - cash_outs - petty_cash
-
-    return {
-        "System amount Cash": round(system_cash,2),
-        "System amount Card": round(system_card,2),
-        "entered cash amount": round(entered_cash,2),
-        "Card amount": round(card_amount,2),
-        "Cash outs": round(cash_outs,2),
-        "Petty cash": round(petty_cash,2),
-        "cash_deficit": round(cash_deficit, 2),
-        "card_deficit": round(card_deficit, 2),
-        "superpay_expected": round(superpay_expected, 2),
-        "net_cash": round(net_cash, 2),
-    }
-
 def compute_daily_metrics_from_sheet(client: SheetsClient, sheet_id: str, sheet_name: str, target_date: datetime.date) -> Dict[str, object]:
-    metrics = {
-        "num_invoices": 0,
-        "num_products": 0,
-        "total_system_sales": 0.0,
-        "total_sales": 0.0,
-        "entered_cash_amount": 0.0,
-        "card_amount": 0.0,
-        "cash_outs": 0.0,
-    }
+    # lightweight summary (used only if needed)
+    metrics = {"num_invoices": 0, "num_products": 0, "total_system_sales": 0.0, "total_sales": 0.0,
+               "entered_cash_amount": 0.0, "card_amount": 0.0, "cash_outs": 0.0}
     try:
         df = client.read_month_sheet(sheet_id, sheet_name)
     except Exception:
         return metrics
-
     date_col = None
     for c in df.columns:
         if c.lower().strip().startswith("date"):
-            date_col = c
-            break
+            date_col = c; break
     if date_col is None:
         return metrics
-
     row_idx = None
     for idx, v in df[date_col].items():
         if _parse_date_cell(v) == target_date:
-            row_idx = idx
-            break
+            row_idx = idx; break
     if row_idx is None:
         return metrics
-
     def get_num(col):
         if col in df.columns:
             try:
@@ -170,57 +117,41 @@ def compute_daily_metrics_from_sheet(client: SheetsClient, sheet_id: str, sheet_
             except Exception:
                 return 0.0
         return 0.0
-
     if "No.Invoices" in df.columns:
-        try:
-            metrics["num_invoices"] = int(float(str(df.at[row_idx, "No.Invoices"]).strip() or 0))
-        except Exception:
-            metrics["num_invoices"] = 0
-
+        try: metrics["num_invoices"] = int(float(str(df.at[row_idx, "No.Invoices"]).strip() or 0))
+        except Exception: metrics["num_invoices"] = 0
     if "No. Products" in df.columns:
-        try:
-            metrics["num_products"] = int(float(str(df.at[row_idx, "No. Products"]).replace(",", "").strip() or 0))
-        except Exception:
-            metrics["num_products"] = 0
-
-    if "Total System Sales" in df.columns:
-        metrics["total_system_sales"] = get_num("Total System Sales")
-    else:
-        metrics["total_system_sales"] = get_num("System amount Cash") + get_num("System amount Card")
-
-    if "Total Sales" in df.columns:
-        metrics["total_sales"] = get_num("Total Sales")
-    else:
-        metrics["total_sales"] = metrics["total_system_sales"]
-
+        try: metrics["num_products"] = int(float(str(df.at[row_idx, "No. Products"]).replace(",", "").strip() or 0))
+        except Exception: metrics["num_products"] = 0
+    metrics["total_system_sales"] = get_num("Total System Sales") if "Total System Sales" in df.columns else get_num("System amount Cash") + get_num("System amount Card")
+    metrics["total_sales"] = get_num("Total Sales") if "Total Sales" in df.columns else metrics["total_system_sales"]
     metrics["entered_cash_amount"] = get_num("entered cash amount")
-    metrics["card_amount"] = get_num("Card amount")
+    # accept both names for card in legacy rows
+    if "entered Card amount" in df.columns:
+        metrics["card_amount"] = get_num("entered Card amount")
+    elif "Card amount" in df.columns:
+        metrics["card_amount"] = get_num("Card amount")
     metrics["cash_outs"] = get_num("Cash outs")
-
     return metrics
 
-# ---------- UI ----------
+# UI
 st.set_page_config(layout="centered")
 st.title("Register Closures — THE G")
 
-# Top: Role and Branch only
+# Top controls: Role & Branch only
 role = st.selectbox("Role", ["Operations Manager", "Operations Team Member", "Alexandria Store Manager", "Zamalek Store Manager"], index=0)
 branch = st.selectbox("Branch", ["Zamalek", "Alexandria"], index=0)
 st.markdown(f"**Branch:** {branch}  •  **Role:** {role}")
 
-# sheet ids map
-SHEET_ID_MAP = {
-    "Zamalek": st.secrets.get("ZAMALEK_SHEET_ID"),
-    "Alexandria": st.secrets.get("ALEXANDRIA_SHEET_ID"),
-}
+# Sheet IDs map
+SHEET_ID_MAP = {"Zamalek": st.secrets.get("ZAMALEK_SHEET_ID"), "Alexandria": st.secrets.get("ALEXANDRIA_SHEET_ID")}
 sheet_id = SHEET_ID_MAP.get(branch)
 if not sheet_id:
     st.error("Missing sheet ID for this branch. Set ZAMALEK_SHEET_ID / ALEXANDRIA_SHEET_ID in Streamlit secrets.")
     st.stop()
 
 # Allowed months Dec_2025 .. Dec_2026
-start = datetime.date(2025, 12, 1)
-end   = datetime.date(2026, 12, 1)
+start = datetime.date(2025, 12, 1); end = datetime.date(2026, 12, 1)
 months = []
 cur = start
 while cur <= end:
@@ -229,15 +160,13 @@ while cur <= end:
     month = cur.month % 12 + 1
     cur = datetime.date(year, month, 1)
 
-# fetch real tabs for the spreadsheet
+# list actual tabs
 try:
-    if hasattr(client, "list_worksheets"):
-        real_tabs = client.list_worksheets(sheet_id) or []
+    if hasattr(client, "list_worksheets"): real_tabs = client.list_worksheets(sheet_id) or []
     else:
         gc = getattr(client, "gc", None) or getattr(client, "_gc", None)
         if gc:
-            sh = gc.open_by_key(sheet_id)
-            real_tabs = [ws.title for ws in sh.worksheets()]
+            sh = gc.open_by_key(sheet_id); real_tabs = [ws.title for ws in sh.worksheets()]
         else:
             real_tabs = []
 except Exception:
@@ -253,16 +182,14 @@ if not available_month_tabs:
 
 sheet_name = st.selectbox("Select month tab", available_month_tabs)
 if not sheet_name:
-    st.info("Select a month tab to continue.")
-    st.stop()
-
+    st.info("Select a month tab to continue."); st.stop()
 st.write(f"Selected tab: **{sheet_name}**")
 
-# read selected tab (do NOT create)
+# read the selected tab (do NOT create)
 try:
     df_month = client.read_month_sheet(sheet_id, sheet_name)
 except Exception as e:
-    st.error(f"Tab '{sheet_name}' not found or cannot be read. Make sure the tab exists and the service account has Editor access.")
+    st.error(f"Tab '{sheet_name}' not found or cannot be read. Make sure the tab exists and service account has Editor access.")
     logger.exception("read_month_sheet failed for %s: %s", sheet_name, e)
     st.stop()
 
@@ -270,45 +197,34 @@ except Exception as e:
 date_col = None
 for c in df_month.columns:
     if c.lower().strip().startswith("date"):
-        date_col = c
-        break
-
+        date_col = c; break
 if date_col is None:
-    st.info("No 'Date' column found in the selected tab. Add a 'Date' column (format yyyy-mm-dd) and reload the app.")
-    st.stop()
+    st.info("No 'Date' column found in the selected tab. Add a 'Date' column (format yyyy-mm-dd) and reload the app."); st.stop()
 
-# build day dropdown from existing Date values — REQUIRE selection
+# build day dropdown from existing date rows (require selection)
 days_map = {}
 for idx, v in df_month[date_col].items():
     d = _parse_date_cell(v)
-    if d:
-        days_map[d.isoformat()] = idx
-
+    if d: days_map[d.isoformat()] = idx
 if not days_map:
-    st.info("No date rows in this tab. You manage rows manually in the sheet; the app will not create them.")
-    st.stop()
-
+    st.info("No date rows in this tab. Manage rows manually in the sheet; the app will not create them."); st.stop()
 sorted_days = sorted(days_map.keys())
 selected_label = st.selectbox("Select day", ["(choose)"] + sorted_days)
 if selected_label == "(choose)":
-    st.info("Select a day to load its row for editing.")
-    st.stop()
-
-# user chose a valid existing day
+    st.info("Select a day to load its row for editing."); st.stop()
 chosen_day = datetime.date.fromisoformat(selected_label)
 row_idx = days_map[selected_label]
 st.success(f"Loaded row for {chosen_day.isoformat()}")
 
-# Edit fields
-st.markdown("Enter values for this day")
-
+# Manual fields (exact set you specified)
 edit_columns = [
     "No.Invoices","No. Products","System amount Cash","System amount Card","Total System Sales",
-    "entered cash amount","Card amount","Cash outs","Employee advances","Transportaion Goods","Transportaion Allowance",
-    "Cleaning","Internet","Cleaning supplies","Bills","Others",
+    "entered cash amount","entered Card amount","Cash outs","system cashouts",
+    "Employee advances","Transportation Goods","Transportation Allowance",
+    "Cleaning","Internet","Cleaning supplies","Bills","Others","Others Comment","Petty cash"
 ]
 
-# prefill values
+# prefill
 current_values = {col: "" for col in edit_columns}
 for col in edit_columns:
     if col in df_month.columns:
@@ -318,48 +234,38 @@ with st.form("single_submit_form", clear_on_submit=False):
     inputs = {}
     for col in edit_columns:
         inputs[col] = st.text_input(col, value=str(current_values.get(col, "")), key=f"input_{col}")
-
     submit = st.form_submit_button("Submit")
 
     if submit:
-        # read latest sheet
+        # reload sheet
         try:
             df = client.read_month_sheet(sheet_id, sheet_name)
         except Exception:
-            st.error("Failed to read sheet before save.")
-            logger.exception("read before write failed")
-            st.stop()
+            st.error("Failed to read sheet before save."); logger.exception("read before write failed"); st.stop()
 
-        # locate date column again
+        # find date col locally
         date_col_local = None
         for c in df.columns:
             if c.lower().strip().startswith("date"):
-                date_col_local = c
-                break
+                date_col_local = c; break
         if date_col_local is None:
-            st.error("Date column missing on write — aborting.")
-            st.stop()
+            st.error("Date column missing on write — aborting."); st.stop()
 
-        # find the existing row index for chosen_day (must exist)
+        # find row index (must exist)
         row_idx_local = None
         for idx, v in df[date_col_local].items():
             if _parse_date_cell(v) == chosen_day:
-                row_idx_local = idx
-                break
+                row_idx_local = idx; break
         if row_idx_local is None:
-            st.error("Selected day is not present in the sheet (row missing). The app will not create rows. Add the row manually and try again.")
-            st.stop()
+            st.error("Selected day is not present in the sheet (row missing). The app will not create rows. Add the row manually and try again."); st.stop()
 
-        # ensure columns the user edits exist in sheet — but DO NOT create audit columns
+        # check that all manual edit columns exist
         missing_edit_cols = [c for c in edit_columns if c not in df.columns]
         if missing_edit_cols:
-            # we DO NOT create these automatically: user must add them to the template tab
-            st.error(f"Missing expected columns in the sheet: {', '.join(missing_edit_cols)}. Add them to the sheet template and reload.")
-            st.stop()
+            st.error(f"Missing expected columns in the sheet: {', '.join(missing_edit_cols)}. Add them to the sheet template and reload."); st.stop()
 
-        # compute changed values (for changelog)
-        changed = {}
-        prev_vals = {}
+        # compute changes for changelog
+        changed = {}; prev_vals = {}
         for col in edit_columns:
             prev = df.at[row_idx_local, col] if col in df.columns else ""
             new = inputs.get(col, "")
@@ -371,45 +277,96 @@ with st.form("single_submit_form", clear_on_submit=False):
                 if str(prev).strip() != str(new).strip():
                     changed_flag = True
             if changed_flag:
-                changed[col] = new
-                prev_vals[col] = prev
+                changed[col] = new; prev_vals[col] = prev
 
-        # write inputs into the existing row (only existing columns)
+        # write back only manual fields
         for col in edit_columns:
             df.at[row_idx_local, col] = inputs.get(col, df.at[row_idx_local, col])
 
-        # DO NOT write Closed By / Closure Time into month sheet
-        closure_dt = now_cairo()
-        closure_ts = format_dt_cairo(closure_dt)
-        closed_by = str(role)
+        # DO NOT write Closed By / Closure Time to month sheet
+        closure_dt = now_cairo(); closure_ts = format_dt_cairo(closure_dt); closed_by = str(role)
 
-        # write back to sheet (overwrite values only)
+        # write back df to sheet (overwrite values)
         try:
             client.write_month_sheet(sheet_id=sheet_id, sheet_name=sheet_name, df=df)
         except Exception as e:
-            st.error("Failed to write to Google Sheets. Ensure the tab exists and service account has Editor access.")
-            logger.exception("write_month_sheet failed: %s", e)
-            st.stop()
+            st.error("Failed to write to Google Sheets. Ensure the tab exists and service account has Editor access."); logger.exception("write_month_sheet failed: %s", e); st.stop()
 
-        # prepare financials computed (not written to month sheet)
-        sp_pct = float(st.secrets.get("SUPERPAY_PERCENT", 0))
-        # build sheet_row dict for baseline values if needed
+        # prepare sheet_row_dict baseline
         sheet_row_dict = {c: df.at[row_idx_local, c] for c in df.columns}
-        financials = compute_financials_from_inputs(inputs, sheet_row=sheet_row_dict, superpay_percent=sp_pct)
 
-        # append changelog (ChangeLog tab is allowed to be created)
+        # per-day totals & accumulative calculations
+        def _safe_from_sources(key, inputs_map, sheet_map):
+            v = inputs_map.get(key, None)
+            if v is None or str(v).strip() == "":
+                v = sheet_map.get(key, 0)
+            try:
+                return float(str(v).replace(",", "").strip() or 0)
+            except Exception:
+                return 0.0
+
+        system_cash_day = _safe_from_sources("System amount Cash", inputs, sheet_row_dict)
+        system_card_day = _safe_from_sources("System amount Card", inputs, sheet_row_dict)
+        entered_cash_day = _safe_from_sources("entered cash amount", inputs, sheet_row_dict)
+        entered_card_day = _safe_from_sources("entered Card amount", inputs, sheet_row_dict)
+        cash_outs_day = _safe_from_sources("Cash outs", inputs, sheet_row_dict)
+        petty_cash_day = _safe_from_sources("Petty cash", inputs, sheet_row_dict)
+
+        total_system_sales_day = round(system_cash_day + system_card_day, 2)
+        total_sales_day = round(entered_cash_day + entered_card_day, 2)
+
+        # accumulative sums up to chosen_day (inclusive) within this tab
+        rows_by_date = []
+        for idx2, v in df[date_col_local].items():
+            d = _parse_date_cell(v)
+            if d is not None:
+                rows_by_date.append((d, idx2))
+        rows_by_date.sort(key=lambda x: x[0])
+
+        acc_cash = 0.0; acc_card = 0.0
+        for d, ridx in rows_by_date:
+            if d > chosen_day:
+                break
+            try:
+                val_cash = float(str(df.at[ridx, "entered cash amount"]).replace(",", "").strip() or 0)
+            except Exception:
+                val_cash = 0.0
+            try:
+                val_card = float(str(df.at[ridx, "entered Card amount"]).replace(",", "").strip() or 0)
+            except Exception:
+                try:
+                    val_card = float(str(df.at[ridx, "Card amount"]).replace(",", "").strip() or 0)
+                except Exception:
+                    val_card = 0.0
+            acc_cash += val_cash; acc_card += val_card
+        acc_cash = round(acc_cash, 2); acc_card = round(acc_card, 2); total_money_accumulative = round(acc_cash + acc_card, 2)
+
+        # deficits and superpay expected and net cash
+        cash_deficit_day = round(system_cash_day - entered_cash_day, 2)
+        card_deficit_day = round(system_card_day - entered_card_day, 2)
+        sp_pct = float(st.secrets.get("SUPERPAY_PERCENT", 0))
+        superpay_expected_day = round(entered_card_day - (entered_card_day * sp_pct / 100.0), 2)
+        net_cash_day = round(entered_cash_day - cash_outs_day - petty_cash_day, 2)
+
+        financials = {
+            "system_cash_day": system_cash_day, "system_card_day": system_card_day,
+            "entered_cash_day": entered_cash_day, "entered_card_day": entered_card_day,
+            "cash_outs_day": cash_outs_day, "petty_cash_day": petty_cash_day,
+            "total_system_sales_day": total_system_sales_day, "total_sales_day": total_sales_day,
+            "cash_deficit_day": cash_deficit_day, "card_deficit_day": card_deficit_day,
+            "superpay_expected_day": superpay_expected_day, "net_cash_day": net_cash_day,
+            "accumulative_cash": acc_cash, "accumulative_card": acc_card, "total_money_accumulative": total_money_accumulative
+        }
+
+        # append changelog (ChangeLog may be created by sheets_client.append_changelog)
         changelog_row = {
-            "timestamp": closure_ts,
-            "user": closed_by,
-            "branch": branch,
-            "sheet": sheet_name,
-            "date": chosen_day.isoformat(),
-            "changed_fields": ", ".join(changed.keys()) if changed else "(filled)",
-            "prev_values": json.dumps(prev_vals, default=str),
-            "new_values": json.dumps(changed if changed else inputs, default=str),
-            "closed_by": closed_by,
-            "closure_time": closure_ts,
-            "financials": json.dumps(financials, default=str)
+            "timestamp": closure_ts, "user": closed_by, "branch": branch, "sheet": sheet_name,
+            "date": chosen_day.isoformat(), "changed_fields": ", ".join(changed.keys()) if changed else "(filled)",
+            "prev_values": json.dumps(prev_vals, default=str), "new_values": json.dumps(changed if changed else inputs, default=str),
+            "closed_by": closed_by, "closure_time": closure_ts,
+            "financials": json.dumps(financials, default=str),
+            "total_system_sales_day": total_system_sales_day, "total_sales_day": total_sales_day,
+            "accumulative_cash": acc_cash, "accumulative_card": acc_card, "total_money": total_money_accumulative
         }
         try:
             if hasattr(client, "append_changelog"):
@@ -426,32 +383,28 @@ with st.form("single_submit_form", clear_on_submit=False):
 
         st.success(f"Saved values for {chosen_day.isoformat()} — changelog appended. Closure time (Cairo): {closure_ts}")
 
-        # build and send daily summary email (report includes computed financials)
+        # Build and send daily summary email
         try:
             report = {
-                "branch": branch,
-                "date": chosen_day.isoformat(),
+                "branch": branch, "date": chosen_day.isoformat(),
                 "No.Invoices": inputs.get("No.Invoices", sheet_row_dict.get("No.Invoices", "")),
                 "No. Products": inputs.get("No. Products", sheet_row_dict.get("No. Products", "")),
-                "System amount Cash": f"{financials['System amount Cash']:.2f}",
-                "System amount Card": f"{financials['System amount Card']:.2f}",
-                "entered cash amount": f"{financials['entered cash amount']:.2f}",
-                "Card amount": f"{financials['Card amount']:.2f}",
-                "cash_deficit": f"{financials['cash_deficit']:.2f}",
-                "card_deficit": f"{financials['card_deficit']:.2f}",
-                "superpay_expected": f"{financials['superpay_expected']:.2f}",
-                "net_cash": f"{financials['net_cash']:.2f}",
-                "closure_time": closure_ts,
-                "closed_by": closed_by,
+                "System amount Cash": f"{system_cash_day:.2f}", "System amount Card": f"{system_card_day:.2f}",
+                "Total System Sales": f"{total_system_sales_day:.2f}", "entered cash amount": f"{entered_cash_day:.2f}",
+                "entered Card amount": f"{entered_card_day:.2f}", "Total Sales": f"{total_sales_day:.2f}",
+                "Cash outs": f"{cash_outs_day:.2f}", "Petty cash": f"{petty_cash_day:.2f}",
+                "Cash Deficit": f"{cash_deficit_day:.2f}", "Card Deficit": f"{card_deficit_day:.2f}",
+                "SuperPay expected": f"{superpay_expected_day:.2f}", "Net cash": f"{net_cash_day:.2f}",
+                "Accumulative cash": f"{acc_cash:.2f}", "Accumulative card": f"{acc_card:.2f}",
+                "Total Money": f"{total_money_accumulative:.2f}", "closure_time": closure_ts, "closed_by": closed_by
             }
-
-            # snapshot optional
+            # snapshot attachment
             snapshot_path = None
             try:
                 updated_df = client.read_month_sheet(sheet_id, sheet_name)
-                for idx, v in updated_df[date_col].items():
+                for idx2, v in updated_df[date_col_local].items():
                     if _parse_date_cell(v) == chosen_day:
-                        snapshot_df = updated_df.loc[[idx]]
+                        snapshot_df = updated_df.loc[[idx2]]
                         snapshot_path = f"/tmp/closure_{branch}_{chosen_day.isoformat()}.csv"
                         snapshot_df.to_csv(snapshot_path, index=False)
                         break
@@ -472,9 +425,8 @@ with st.form("single_submit_form", clear_on_submit=False):
                 else:
                     st.error("Failed to send daily summary email. Check SMTP secrets and logs.")
         except Exception:
-            logger.exception("Daily summary send failed")
-            st.error("Failed to send daily summary email. See logs.")
+            logger.exception("Daily summary send failed"); st.error("Failed to send daily summary email. See logs.")
 
-# footer (local service-account JSON path)
+# footer - local service-account JSON path (for your reference)
 st.markdown("---")
 st.markdown("Service-account JSON (local): `/mnt/data/b19a61d2-13c7-49f2-a19f-f20665f57d6e.json`")
