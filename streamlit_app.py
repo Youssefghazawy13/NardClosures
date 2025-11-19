@@ -6,6 +6,32 @@ import datetime
 import json
 
 import streamlit as st
+# TEMP SMTP CHECK - paste and run, then remove
+import smtplib, ssl
+import streamlit as st
+
+st.sidebar.markdown("### SMTP debug (temporary)")
+try:
+    server = st.secrets.get("SMTP_SERVER")
+    port = int(st.secrets.get("SMTP_PORT") or 587)
+    user = st.secrets.get("SMTP_USER")
+    pwd = st.secrets.get("SMTP_PASSWORD")
+    st.sidebar.write("SMTP server preview:", server, port)
+    st.sidebar.write("SMTP user (masked):", (user[:3] + "..." + user[-5:]) if user else None)
+
+    ctx = ssl.create_default_context()
+    with smtplib.SMTP(server, port, timeout=20) as s:
+        s.ehlo()
+        s.starttls(context=ctx)
+        s.ehlo()
+        s.login(user, pwd)
+    st.sidebar.success("SMTP login successful ✅")
+except Exception as e:
+    st.sidebar.error("SMTP test failed. See error below.")
+    st.sidebar.write(repr(e))
+    import logging
+    logging.exception("SMTP test failed")
+
 from dotenv import load_dotenv
 load_dotenv()
 
