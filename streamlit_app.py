@@ -128,7 +128,7 @@ def compute_daily_metrics_from_sheet(client: SheetsClient, sheet_id: str, sheet_
 
 # UI
 st.set_page_config(layout="centered")
-st.title("Register Closures — THE G")
+st.title("Register Closures — Slot-X")
 
 # Top controls: Role & Branch only
 role = st.selectbox("Role", ["Operations Manager", "Operations Team Member", "Alexandria Store Manager", "Zamalek Store Manager"], index=0)
