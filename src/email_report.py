@@ -21,9 +21,8 @@ def _build_plain_text_report(report: Dict[str, str]) -> str:
     return "\n".join(lines)
 
 def _build_html_table(report: Dict[str, str]) -> str:
-    # produce a simple bordered table
-    rows = []
     order = [
+        "role","user_first_name","user_last_name",
         "No.Invoices","No. Products","System amount Cash","System amount Card","Total System Sales",
         "entered cash amount","entered Card amount","Total Sales",
         "Cash outs","Petty cash","Cash Deficit","Card Deficit","SuperPay expected","SuperPay sent","SuperPay diff","Net cash",
