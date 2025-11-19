@@ -126,6 +126,107 @@ if st.button("Compare & Save"):
             st.write(f"Parse issue — field: {field}, which: {which}, raw: {raw!r}, error: {err_msg}")
 
     if changed_fields:
+        # --- Replace the placeholder "Proceeding to save..." with this block ---
+
+# map branch to sheet id from secrets
+sheet_id_map = {
+    "Zamalek": st.secrets.get("ZAMALEK_SHEET_ID"),
+    "Alexandria": st.secrets.get("ALEXANDRIA_SHEET_ID"),
+}
+
+# helper: determine sheet tab name for a given date (adjust format to your sheet names)
+def month_sheet_name_for_date(d: datetime.date) -> str:
+    # example: "12_2025" or "Dec_2025" — change to match your tab names
+    return f"{d.month}_{d.year}"
+
+# Convert a human date or today's date for the save
+# (in your real UI you already have a selected date — replace this)
+save_date = datetime.date.today()  # replace with the actual date selected in UI
+
+sheet_id = sheet_id_map.get(branch)
+if not sheet_id:
+    st.error("No sheet_id configured for branch: " + str(branch))
+else:
+    sheet_name = month_sheet_name_for_date(save_date)
+
+    try:
+        # Read the whole month sheet into DataFrame (preserves headers)
+        df = client.read_month_sheet(sheet_id, sheet_name)
+
+        # Find the row index for the selected date (assumes a 'Date' column)
+        # If your Date column format differs, adjust parsing accordingly.
+        date_col = None
+        for c in df.columns:
+            if c.lower().strip().startswith("date"):
+                date_col = c
+                break
+        if date_col is None:
+            st.error("Could not find a 'Date' column in the sheet.")
+        else:
+            # Normalize and find the date row
+            # Assume df[date_col] contains dates in 'YYYY-MM-DD' or 'DD/MM/YYYY' etc.
+            # We'll convert both sides to date objects for comparison.
+            def parse_date_cell(v):
+                if pd.isna(v):
+                    return None
+                try:
+                    return pd.to_datetime(v).date()
+                except Exception:
+                    return None
+
+            target_date = save_date
+            row_idx = None
+            for idx, v in df[date_col].items():
+                if parse_date_cell(v) == target_date:
+                    row_idx = idx
+                    break
+
+            if row_idx is None:
+                # If the date row does not exist, append a new empty row and set its date
+                new_row = {c: "" for c in df.columns}
+                new_row[date_col] = target_date.strftime("%Y-%m-%d")
+                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                row_idx = len(df) - 1
+
+            # Update the df row with edited values for manual_fields
+            for fld in manual_fields:
+                if fld in df.columns:
+                    # Overwrite the value in the data frame
+                    df.at[row_idx, fld] = edited.get(fld, df.at[row_idx, fld])
+                else:
+                    # Column missing in sheet: create it
+                    df[fld] = ""
+                    df.at[row_idx, fld] = edited.get(fld, "")
+
+            # Write back the sheet (client should handle replacing the worksheet content)
+            # Method name: adapt if your client uses a different method
+            client.write_month_sheet(sheet_id=sheet_id, sheet_name=sheet_name, df=df)
+
+            # Append changelog (if your sheets client supports it). If not, you can write to a 'ChangeLog' sheet/tab.
+            changelog_row = {
+                "timestamp": datetime.datetime.now().isoformat(),
+                "user": role,
+                "branch": branch,
+                "date": target_date.isoformat(),
+                "changed_fields": ", ".join(changed_fields),
+            }
+            # try to append to a central changelog sheet
+            try:
+                client.append_changelog(sheet_id, changelog_row)   # adapt if method signature differs
+            except Exception:
+                # If append_changelog not implemented, write to a `ChangeLog` tab in the same sheet.
+                try:
+                    changelog_df = client.read_month_sheet(sheet_id, "ChangeLog")
+                except Exception:
+                    changelog_df = pd.DataFrame(columns=list(changelog_row.keys()))
+                changelog_df = pd.concat([changelog_df, pd.DataFrame([changelog_row])], ignore_index=True)
+                client.write_month_sheet(sheet_id=sheet_id, sheet_name="ChangeLog", df=changelog_df)
+
+            st.success("Saved changes and appended changelog.")
+    except Exception as e:
+        st.error("Failed to save changes. Check logs for details.")
+        logger.exception("Save changes failed")
+
         st.success(f"Detected changed fields: {changed_fields}")
     else:
         st.info("No changed numeric fields detected.")
