@@ -134,7 +134,7 @@ def compute_daily_metrics_from_sheet(client: SheetsClient, sheet_id: str, sheet_
 
 # ----------------------- UI (mobile-first) --------------------------------
 st.set_page_config(layout="centered")
-st.title("Register Closures — THE G")
+st.title("Register Closures — Slot-X")
 
 # Top controls
 st.markdown("### Controls")
