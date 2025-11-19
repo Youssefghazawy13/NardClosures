@@ -1,5 +1,6 @@
 # streamlit_app.py
-# Branch-first UI, branch-scoped roles, require first & last name for every role.
+# Final patched app: branch-first, branch-scoped roles, required first/last name,
+# computed totals, robust SUPERPAY_PERCENT parsing, changelog + email.
 import os
 import re
 import json
@@ -33,7 +34,7 @@ st_secrets = st.secrets if hasattr(st, "secrets") else {}
 try:
     client = SheetsClient(st_secrets)
 except Exception:
-    st.error("Failed to initialize Sheets client. Check SERVICE_ACCOUNT_JSON and sheet IDs in Streamlit secrets.")
+    st.error("Failed to initialize Sheets client. Check SERVICE_ACCOUNT_JSON (or GOOGLE_SERVICE_ACCOUNT_FILE) and sheet IDs in Streamlit secrets.")
     logger.exception("SheetsClient init failed")
     st.stop()
 
@@ -126,9 +127,47 @@ def compute_daily_metrics_from_sheet(client: SheetsClient, sheet_id: str, sheet_
     metrics["cash_outs"] = get_num("Cash outs")
     return metrics
 
+# robust percent parser (handles "1.4", "1.4%", "0.014" -> 1.4)
+def parse_superpay_percent(raw) -> float:
+    """
+    Returns percent value as float. Examples:
+      "1.4"   -> 1.4
+      "1.4%"  -> 1.4
+      1.4     -> 1.4
+      "0.014" -> 1.4  (treat small fraction as fraction -> percent)
+      "0.014%"-> 0.014 (explicit percent sign preserves literal)
+    Heuristic threshold: values < 0.02 (2%) and without % are treated as fractions.
+    """
+    try:
+        if raw is None:
+            return 0.0
+        s = str(raw).strip()
+        if s == "":
+            return 0.0
+        has_pct = s.endswith("%")
+        if has_pct:
+            s2 = s[:-1].strip()
+            if s2 == "":
+                return 0.0
+            return float(s2)
+        # no percent sign
+        val = float(s)
+        if 0 < val < 0.02:
+            return val * 100.0
+        return val
+    except Exception:
+        try:
+            s2 = re.sub(r"[^\d\.\-]", "", str(raw))
+            v = float(s2) if s2 else 0.0
+            if 0 < v < 0.02:
+                return v * 100.0
+            return v
+        except Exception:
+            return 0.0
+
 # UI
 st.set_page_config(layout="centered")
-st.title("Register Closures — Slot-X")
+st.title("Register Closures — SLot-X")
 
 # --- Branch selection first (start with placeholder) ---
 branch_options = ["(choose)", "Zamalek", "Alexandria"]
@@ -149,7 +188,6 @@ role = st.selectbox("Role", role_options, index=0, key="ui_role_select")
 user_first = ""
 user_last = ""
 if role != "(choose)":
-    # label depends on role to help user, but still same fields
     if "Owner" in role:
         st.markdown("**Owner details**")
     elif "Sales Member" in role:
@@ -188,7 +226,8 @@ while cur <= end:
 
 # list actual tabs
 try:
-    if hasattr(client, "list_worksheets"): real_tabs = client.list_worksheets(sheet_id) or []
+    if hasattr(client, "list_worksheets"):
+        real_tabs = client.list_worksheets(sheet_id) or []
     else:
         gc = getattr(client, "gc", None) or getattr(client, "_gc", None)
         if gc:
@@ -379,9 +418,14 @@ with st.form("single_submit_form", clear_on_submit=False):
         # deficits and superpay expected and net cash
         cash_deficit_day = round(system_cash_day - entered_cash_day, 2)
         card_deficit_day = round(system_card_day - entered_card_day, 2)
-        sp_pct = float(st.secrets.get("SUPERPAY_PERCENT", 0))
-        # SuperPay expected: card * (1 - pct/100)
+
+        # robust parsing for SUPERPAY_PERCENT and calculation:
+        raw_sp = st.secrets.get("SUPERPAY_PERCENT", 0)
+        sp_pct = parse_superpay_percent(raw_sp)
+        # SuperPay expected: card_sales - (card_sales * sp_pct/100)
+        # using entered_card_day as the card sales source
         superpay_expected_day = round(entered_card_day * (1.0 - sp_pct / 100.0), 2)
+
         net_cash_day = round(entered_cash_day - cash_outs_day - petty_cash_day, 2)
 
         financials = {
@@ -408,7 +452,7 @@ with st.form("single_submit_form", clear_on_submit=False):
             "Card Deficit": financials.get("card_deficit_day"),
         }
 
-        # SuperPay diff compute
+        # SuperPay diff compute (tries to read SuperPay sent if present)
         superpay_sent_val = None
         if "SuperPay sent" in inputs and inputs.get("SuperPay sent", "") != "":
             try:
