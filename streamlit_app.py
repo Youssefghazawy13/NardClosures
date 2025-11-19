@@ -1,4 +1,4 @@
-# streamlit_app.py (complete, mobile-first, production-ready)
+# streamlit_app.py (complete, mobile-first, shows branch -> sheet tabs -> dates)
 import os
 import re
 import json
@@ -14,12 +14,11 @@ import pandas as pd
 
 # project modules (must exist under src/)
 from src.sheets_client import SheetsClient
-from src.calc import recalc_forward
 from src.email_report import send_daily_submission_report
 
 # ----------------------- logging ------------------------------------------
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.WARNING)  # keep production quieter; exceptions are still logged
+logger.setLevel(logging.WARNING)
 
 # ----------------------- init Sheets client --------------------------------
 st_secrets = st.secrets if hasattr(st, "secrets") else {}
@@ -32,7 +31,6 @@ except Exception:
 
 # ----------------------- helpers ------------------------------------------
 def safe_float(val):
-    """Robust conversion to float used for numeric comparisons."""
     if val is None:
         return 0.0
     if isinstance(val, (int, float)):
@@ -48,12 +46,11 @@ def safe_float(val):
         raise ValueError(f"Unparseable numeric value: {val!r}")
     return float(s)
 
-def month_sheet_name_for_date(d: datetime.date) -> str:
-    """Return tab name for a given date. Adjust if your tabs use a different format."""
-    return f"{d.month}/{d.year}"
+def month_sheet_name_for_date_monthname(d: datetime.date) -> str:
+    """Format for tabs: 'December_2025'"""
+    return d.strftime("%B_%Y")
 
 def _find_column(df_local: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-    """Return first matching column name from candidates (case-insensitive exact match)."""
     for cand in candidates:
         for c in df_local.columns:
             if c.lower().strip() == cand.lower().strip():
@@ -69,7 +66,6 @@ def _parse_date_cell(v):
         return None
 
 def compute_daily_metrics_from_sheet(client: SheetsClient, sheet_id: str, sheet_name: str, target_date: datetime.date) -> Dict[str, object]:
-    """Compute summary metrics for the target_date row in the given sheet tab."""
     metrics = {
         "num_invoices": 0,
         "num_products": 0,
@@ -140,12 +136,11 @@ def compute_daily_metrics_from_sheet(client: SheetsClient, sheet_id: str, sheet_
 st.set_page_config(layout="centered")
 st.title("Register Closures — THE G")
 
-# Top controls (immediately under title, mobile-friendly)
+# Top controls
 st.markdown("### Controls")
 role = st.selectbox("Role", ["Operations Manager", "Operations Team Member", "Alexandria Store Manager", "Zamalek Store Manager"], index=0)
 branch = st.selectbox("Branch", ["Zamalek", "Alexandria"], index=0)
 selected_date = st.date_input("Date", value=datetime.date.today())
-
 st.markdown(f"**Branch:** {branch} • **Role:** {role} • **Date:** {selected_date.isoformat()}")
 
 # Map branch -> sheet id
@@ -158,112 +153,99 @@ if not sheet_id:
     st.error("Missing sheet ID for this branch. Set ZAMALEK_SHEET_ID / ALEXANDRIA_SHEET_ID in Streamlit secrets.")
     st.stop()
 
-# ----------------------- Sheet tabs listing & preview ----------------------
-st.markdown("### Sheet (month) selection & preview")
+# ----------------------- Branch -> tabs -> dates selector ------------------
+st.markdown("### Select sheet (tab) and day")
 
-# Try to get worksheet names (tabs)
+# 1) list worksheets for branch
 sheet_tabs = []
 try:
     if hasattr(client, "list_worksheets"):
-        sheet_tabs = client.list_worksheets(sheet_id)
+        sheet_tabs = client.list_worksheets(sheet_id) or []
     else:
-        # Fallback attempt: if client exposes a method to read an 'Index' tab listing tabs
-        try:
-            idx_df = client.read_month_sheet(sheet_id, "Index")
-            if "sheet_name" in idx_df.columns:
-                sheet_tabs = [str(x) for x in idx_df["sheet_name"].dropna().unique()]
-        except Exception:
-            sheet_tabs = []
+        # try to access underlying gspread client
+        gc = getattr(client, "gc", None) or getattr(client, "_gc", None)
+        if gc:
+            sh = gc.open_by_key(sheet_id)
+            sheet_tabs = [ws.title for ws in sh.worksheets()]
+        else:
+            # fallback try reading Index tab
+            try:
+                idx_df = client.read_month_sheet(sheet_id, "Index")
+                if "sheet_name" in idx_df.columns:
+                    sheet_tabs = [str(x) for x in idx_df["sheet_name"].dropna().unique()]
+            except Exception:
+                sheet_tabs = []
 except Exception:
     sheet_tabs = []
 
-# if no tabs discovered, allow manual input
 if not sheet_tabs:
-    st.info("No tabs discovered automatically. You may type the sheet (tab) name, e.g. '12/2025'. The app will create the tab if missing.")
-    sheet_name = st.text_input("Sheet / Tab name (e.g. 12/2025)", value=month_sheet_name_for_date(selected_date))
+    st.warning("No tabs detected automatically for this branch. Make sure the Service Account has access and the sheet exists.")
+    sheet_name = st.text_input("Enter sheet (tab) name manually (e.g. December_2025):", value=month_sheet_name_for_date_monthname(selected_date))
 else:
-    sheet_name = st.selectbox("Choose sheet (month tab)", sheet_tabs, index=0 if month_sheet_name_for_date(selected_date) not in sheet_tabs else sheet_tabs.index(month_sheet_name_for_date(selected_date)))
+    sheet_name = st.selectbox("Choose sheet (tab)", sheet_tabs)
 
-st.write(f"Selected sheet: **{sheet_name}**")
+if not sheet_name:
+    st.info("Select or type a sheet/tab name to continue.")
+    st.stop()
 
-# Preview sheet (and create template tab if it doesn't exist)
+st.write(f"Selected tab: **{sheet_name}**")
+
+# 2) read the selected sheet and list dates inside it
 df_month = None
-created_new_tab = False
 try:
-    try:
-        df_month = client.read_month_sheet(sheet_id, sheet_name)
-    except Exception:
-        # create a template tab with columns we expect
-        template_cols = ["Date",
-                         "No.Invoices","No. Products",
-                         "System amount Cash","System amount Card","Total System Sales","Total Sales",
-                         "entered cash amount","Card amount","Cash outs",
-                         "Employee advances","Transportaion Goods","Transportaion Allowance",
-                         "Cleaning","Internet","Cleaning supplies","Bills","Others",
-                         "Closed By","Closure Time"]
-        empty_df = pd.DataFrame(columns=template_cols)
-        client.write_month_sheet(sheet_id=sheet_id, sheet_name=sheet_name, df=empty_df)
-        df_month = empty_df
-        created_new_tab = True
-except Exception:
-    logger.exception("Could not read or create month tab")
-    st.error("Unable to read or create the selected tab. Check Service Account permissions & sheet ID.")
+    df_month = client.read_month_sheet(sheet_id, sheet_name)
+except Exception as e:
+    st.error(f"Unable to read the selected tab **{sheet_name}**. Make sure the tab exists and the service account has Editor access.")
+    logger.exception("Failed to read selected tab %s: %s", sheet_name, e)
+    st.stop()
 
-if created_new_tab:
-    st.info("Month tab did not exist — created a new tab using the standard template.")
-
-if df_month is not None:
-    try:
-        st.dataframe(df_month.head(10), use_container_width=True)
-    except Exception:
-        st.write("Preview not available")
-
-# ----------------------- Choose day (from Date column) ---------------------
-st.markdown("### Choose day")
+# find Date column
 date_col = None
-if df_month is not None:
-    for c in df_month.columns:
-        if c.lower().strip().startswith("date"):
-            date_col = c
-            break
+for c in df_month.columns:
+    if c.lower().strip().startswith("date"):
+        date_col = c
+        break
 
-row_idx = None
-chosen_day = selected_date
-if df_month is None or date_col is None:
-    st.info("No Date column detected or sheet unavailable. You can create a new row by saving the form below.")
-    # chosen_day stays as selected_date
+if date_col is None:
+    st.info("No 'Date' column detected in this tab. The app expects a Date column to list days.")
+    chosen_date = st.date_input("Choose date manually", value=selected_date)
+    row_idx = None
 else:
-    # collect available days from the Date column
     days_map = {}
     for idx, v in df_month[date_col].items():
         d = _parse_date_cell(v)
         if d:
             days_map[d.isoformat()] = idx
-    if days_map:
-        # show dropdown labeled with ISO dates (keeps interface simple)
-        day_labels = sorted(days_map.keys())
-        selected_label = st.selectbox("Existing days in sheet", ["(choose)"] + day_labels)
-        if selected_label != "(choose)":
-            chosen_day = datetime.date.fromisoformat(selected_label)
-            row_idx = days_map[selected_label]
-    else:
-        st.info("No date rows found in this tab yet. Create the row by filling the form and saving.")
 
-# ----------------------- Edit form for selected day ------------------------
+    if not days_map:
+        st.info("No date rows found in this tab yet. You can create the row by saving the form below.")
+        chosen_date = st.date_input("Choose date to create", value=selected_date)
+        row_idx = None
+    else:
+        sorted_days = sorted(days_map.keys())
+        selected_label = st.selectbox("Choose existing day", ["(choose)"] + sorted_days)
+        if selected_label == "(choose)":
+            st.info("Pick a day from the list to load its row for editing.")
+            row_idx = None
+            chosen_date = selected_date
+        else:
+            chosen_date = datetime.date.fromisoformat(selected_label)
+            row_idx = days_map[selected_label]
+            st.success(f"Loaded row for {chosen_date.isoformat()} (row index: {row_idx})")
+
+# ----------------------- Day edit form ------------------------------------
 st.markdown("### Day row (edit or create)")
 edit_columns = [
     "No.Invoices","No. Products","System amount Cash","System amount Card","Total System Sales",
-    "entered cash amount","Card amount","Cash outs","Cleaning","Internet","Cleaning supplies","Bills","Others"
+    "entered cash amount","Card amount","Cash outs","Cleaning","Internet","Cleaning supplies","Bills","Others",
 ]
 
-# prefill inputs with existing row values if available
 current_values = {col: "" for col in edit_columns}
 if df_month is not None and date_col and row_idx is not None:
     for col in edit_columns:
         if col in df_month.columns:
             current_values[col] = df_month.at[row_idx, col] if pd.notna(df_month.at[row_idx, col]) else ""
 
-# build form
 with st.form("day_edit_form", clear_on_submit=False):
     inputs = {}
     for col in edit_columns:
@@ -271,15 +253,12 @@ with st.form("day_edit_form", clear_on_submit=False):
     save_clicked = st.form_submit_button("Save row to sheet")
 
     if save_clicked:
-        # read latest sheet
         try:
             df = client.read_month_sheet(sheet_id, sheet_name)
         except Exception:
-            # create template if missing
             template_cols = ["Date"] + edit_columns + ["Closed By", "Closure Time"]
             df = pd.DataFrame(columns=template_cols)
 
-        # find or create date column
         date_col_local = None
         for c in df.columns:
             if c.lower().strip().startswith("date"):
@@ -290,21 +269,18 @@ with st.form("day_edit_form", clear_on_submit=False):
             if date_col_local not in df.columns:
                 df.insert(0, date_col_local, "")
 
-        # locate existing row for chosen_day
         row_idx_local = None
         for idx, v in df[date_col_local].items():
-            if _parse_date_cell(v) == chosen_day:
+            if _parse_date_cell(v) == chosen_date:
                 row_idx_local = idx
                 break
 
         if row_idx_local is None:
-            # append new row
             new_row = {c: "" for c in df.columns}
-            new_row[date_col_local] = chosen_day.isoformat()
+            new_row[date_col_local] = chosen_date.isoformat()
             df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
             row_idx_local = len(df) - 1
 
-        # ensure edit columns exist and cast to object
         for col in edit_columns:
             if col not in df.columns:
                 df[col] = ""
@@ -314,7 +290,6 @@ with st.form("day_edit_form", clear_on_submit=False):
                 except Exception:
                     df[col] = df[col].apply(lambda x: x if (x is None or isinstance(x, str)) else x)
 
-        # compute changes (numeric safe where possible)
         changed = {}
         prev_vals = {}
         for col in edit_columns:
@@ -334,11 +309,9 @@ with st.form("day_edit_form", clear_on_submit=False):
         if not changed:
             st.info("No changes detected. Nothing to save.")
         else:
-            # write changed values
             for col, val in changed.items():
                 df.at[row_idx_local, col] = val
 
-            # write Closed By (use role) and Closure Time if missing
             closed_by_col = _find_column(df, ["Closed By", "closed_by", "ClosedBy"]) or "Closed By"
             if closed_by_col not in df.columns:
                 df[closed_by_col] = ""
@@ -347,34 +320,29 @@ with st.form("day_edit_form", clear_on_submit=False):
             closure_col = _find_column(df, ["Closed At", "Closure Time", "closed_at", "closed_time"]) or "Closure Time"
             if closure_col not in df.columns:
                 df[closure_col] = ""
-            # if already populated keep it; else set now
             if not df.at[row_idx_local, closure_col]:
                 df.at[row_idx_local, closure_col] = datetime.datetime.now().isoformat(sep=' ', timespec='seconds')
 
-            # write back to sheet
             try:
                 client.write_month_sheet(sheet_id=sheet_id, sheet_name=sheet_name, df=df)
-            except Exception as e:
-                st.error("Failed to write to Google Sheets. Check permissions & sheet ID.")
+            except Exception:
+                st.error("Failed to write to Google Sheets. Check permissions and sheet ID.")
                 logger.exception("Failed to write month sheet")
             else:
-                # append changelog inside the same Google Sheet (ChangeLog tab)
                 changelog_row = {
                     "timestamp": datetime.datetime.now().isoformat(),
                     "user": role,
                     "branch": branch,
                     "sheet": sheet_name,
-                    "date": chosen_day.isoformat(),
+                    "date": chosen_date.isoformat(),
                     "changed_fields": ", ".join(changed.keys()),
                     "prev_values": json.dumps(prev_vals, default=str),
                     "new_values": json.dumps(changed, default=str)
                 }
                 try:
-                    # prefer client.append_changelog if available
                     if hasattr(client, "append_changelog"):
                         client.append_changelog(sheet_id, changelog_row)
                     else:
-                        # fallback to writing ChangeLog tab
                         try:
                             ch_df = client.read_month_sheet(sheet_id, "ChangeLog")
                         except Exception:
@@ -384,17 +352,15 @@ with st.form("day_edit_form", clear_on_submit=False):
                 except Exception:
                     logger.exception("Failed to append changelog")
 
-                st.success(f"Saved row for {chosen_day.isoformat()} — changed: {', '.join(changed.keys())}")
+                st.success(f"Saved row for {chosen_date.isoformat()} — changed: {', '.join(changed.keys())}")
 
-                # offer CSV download snapshot of updated row
                 try:
-                    # re-read updated sheet and produce snapshot
                     updated_df = client.read_month_sheet(sheet_id, sheet_name)
                     for idx, v in updated_df[date_col_local].items():
-                        if _parse_date_cell(v) == chosen_day:
+                        if _parse_date_cell(v) == chosen_date:
                             snapshot_df = updated_df.loc[[idx]]
                             csv_bytes = snapshot_df.to_csv(index=False).encode("utf-8")
-                            st.download_button(label="Download updated row (CSV)", data=csv_bytes, file_name=f"closure_{branch}_{chosen_day.isoformat()}.csv", mime="text/csv")
+                            st.download_button(label="Download updated row (CSV)", data=csv_bytes, file_name=f"closure_{branch}_{chosen_date.isoformat()}.csv", mime="text/csv")
                             break
                 except Exception:
                     logger.exception("Failed to prepare snapshot download")
@@ -402,9 +368,7 @@ with st.form("day_edit_form", clear_on_submit=False):
 # ----------------------- Send today's summary email (detailed) -------------
 st.markdown("### Reporting")
 if st.button("Send today's summary email (test)"):
-    # compute metrics
     metrics = compute_daily_metrics_from_sheet(client, sheet_id, sheet_name, selected_date)
-
     report = {
         "branch": branch,
         "date": selected_date.isoformat(),
@@ -417,11 +381,9 @@ if st.button("Send today's summary email (test)"):
         "closed_by": str(role),
     }
 
-    # try to attach the day's row CSV if exists
     snapshot_path: Optional[str] = None
     try:
         df_month2 = client.read_month_sheet(sheet_id, sheet_name)
-        # find date column and row
         date_col2 = None
         for c in df_month2.columns:
             if c.lower().strip().startswith("date"):
@@ -439,15 +401,11 @@ if st.button("Send today's summary email (test)"):
             for key_col in ["No.Invoices", "No. Products", "System amount Cash", "System amount Card", "Total System Sales"]:
                 if key_col in df_month2.columns:
                     report[key_col] = str(_get_cell(key_col))
-
-            # closure_time: prefer sheet value else now
             closure_col2 = _find_column(df_month2, ["Closed At", "Closure Time", "closed_at", "closed_time"])
             if closure_col2:
                 report["closure_time"] = str(_get_cell(closure_col2))
             else:
                 report["closure_time"] = datetime.datetime.now().isoformat(sep=' ', timespec='seconds')
-
-            # snapshot CSV
             try:
                 snapshot_df = df_month2.loc[[row_idx2]]
                 snapshot_path = f"/tmp/closure_{branch}_{selected_date.isoformat()}.csv"
@@ -457,7 +415,6 @@ if st.button("Send today's summary email (test)"):
     except Exception:
         logger.exception("Failed reading month sheet for email report")
 
-    # recipients from secrets
     raw_recipients = st.secrets.get("REPORT_RECIPIENTS", "")
     recipients: List[str] = [r.strip() for r in raw_recipients.split(",") if r.strip()] if raw_recipients else []
     if not recipients:
@@ -476,6 +433,6 @@ if st.button("Send today's summary email (test)"):
             st.error("Failed to send email. See logs.")
             logger.exception("Email send failed (detailed)")
 
-# ----------------------- Footer / service-account path ---------------------
+# Footer: local service-account JSON path (for your reference)
 st.markdown("---")
 st.markdown("Service-account JSON (local): `sandbox:/mnt/data/b19a61d2-13c7-49f2-a19f-f20665f57d6e.json`")
