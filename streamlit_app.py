@@ -1,5 +1,5 @@
 # streamlit_app.py
-# Final app: Role -> Branch -> month tab -> existing day -> edit manual fields -> Submit writes only manual fields, appends ChangeLog, sends email
+# Updated: Total System Sales and Total Sales computed by app; SuperPay expected computed as card * (1 - pct/100)
 import os
 import re
 import json
@@ -117,7 +117,7 @@ def compute_daily_metrics_from_sheet(client: SheetsClient, sheet_id: str, sheet_
         try: metrics["num_products"] = int(float(str(df.at[row_idx, "No. Products"]).replace(",", "").strip() or 0))
         except Exception: metrics["num_products"] = 0
     metrics["total_system_sales"] = get_num("Total System Sales") if "Total System Sales" in df.columns else get_num("System amount Cash") + get_num("System amount Card")
-    metrics["total_sales"] = get_num("Total Sales") if "Total Sales" in df.columns else metrics["total_system_sales"]
+    metrics["total_sales"] = get_num("Total Sales") if "Total Sales" in df.columns else (get_num("entered cash amount") + get_num("entered Card amount") if "entered Card amount" in df.columns else get_num("entered cash amount") + get_num("Card amount"))
     metrics["entered_cash_amount"] = get_num("entered cash amount")
     if "entered Card amount" in df.columns:
         metrics["card_amount"] = get_num("entered Card amount")
@@ -208,9 +208,9 @@ chosen_day = datetime.date.fromisoformat(selected_label)
 row_idx = days_map[selected_label]
 st.success(f"Loaded row for {chosen_day.isoformat()}")
 
-# Manual fields (exact set)
+# Manual fields (Total System Sales removed — app calculates it)
 edit_columns = [
-    "No.Invoices","No. Products","System amount Cash","System amount Card","Total System Sales",
+    "No.Invoices","No. Products","System amount Cash","System amount Card",
     "entered cash amount","entered Card amount","Cash outs","system cashouts",
     "Employee advances","Transportation Goods","Transportation Allowance",
     "Cleaning","Internet","Cleaning supplies","Bills","Others","Others Comment","Petty cash"
@@ -304,10 +304,10 @@ with st.form("single_submit_form", clear_on_submit=False):
         cash_outs_day = _safe_from_sources("Cash outs", inputs, sheet_row_dict)
         petty_cash_day = _safe_from_sources("Petty cash", inputs, sheet_row_dict)
 
-        # Total System Sales = system_cash + system_card
+        # Total System Sales = system_cash + system_card (app-calculated)
         total_system_sales_day = round(system_cash_day + system_card_day, 2)
-        # Total Sales per your last instruction: entered cash amount - entered Card amount
-        total_sales_day = round(entered_cash_day - entered_card_day, 2)
+        # Total Sales = entered cash amount + entered Card amount (app-calculated)
+        total_sales_day = round(entered_cash_day + entered_card_day, 2)
 
         # accumulative sums up to chosen_day (inclusive) within this tab
         rows_by_date = []
@@ -339,8 +339,8 @@ with st.form("single_submit_form", clear_on_submit=False):
         cash_deficit_day = round(system_cash_day - entered_cash_day, 2)
         card_deficit_day = round(system_card_day - entered_card_day, 2)
         sp_pct = float(st.secrets.get("SUPERPAY_PERCENT", 0))
-        # CORRECT SuperPay expected: card - (card * sp_pct/100)
-        superpay_expected_day = round(entered_card_day - (entered_card_day * sp_pct / 100.0), 2)
+        # CORRECT SuperPay expected: card * (1 - pct/100)
+        superpay_expected_day = round(entered_card_day * (1.0 - sp_pct / 100.0), 2)
         net_cash_day = round(entered_cash_day - cash_outs_day - petty_cash_day, 2)
 
         financials = {
@@ -355,6 +355,8 @@ with st.form("single_submit_form", clear_on_submit=False):
 
         # --------- WRITE computed columns into the month sheet row (only if columns exist) ----------
         computed_to_write = {
+            "Total System Sales": total_system_sales_day,
+            "Total Sales": total_sales_day,
             "Net cash": financials.get("net_cash_day"),
             "net cash": financials.get("net_cash_day"),
             "Accumulative cash": financials.get("accumulative_cash"),
@@ -363,7 +365,6 @@ with st.form("single_submit_form", clear_on_submit=False):
             "SuperPay expected": financials.get("superpay_expected_day"),
             "Cash Deficit": financials.get("cash_deficit_day"),
             "Card Deficit": financials.get("card_deficit_day"),
-            "Total Sales": total_sales_day
         }
 
         # SuperPay diff compute
